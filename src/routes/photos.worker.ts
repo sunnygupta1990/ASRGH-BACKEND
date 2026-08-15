@@ -58,6 +58,10 @@ const upload = multer({
   },
 });
 
+function normalizeParam(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
+}
+
 function extensionForMimeType(mimeType: string): string {
   const extensions: Record<string, string> = {
     "image/jpeg": "jpg",
@@ -70,6 +74,14 @@ function extensionForMimeType(mimeType: string): string {
   return extensions[mimeType] ?? "bin";
 }
 
+function objectKeyFromStorageKey(storageKey: string): string | null {
+  if (!storageKey.startsWith("/media/")) {
+    return null;
+  }
+
+  return storageKey.replace(/^\/media\//, "");
+}
+
 router.post(
   "/albums/:albumId/photos",
   requireAuth,
@@ -77,6 +89,7 @@ router.post(
   async (req: AuthenticatedRequest, res) => {
     try {
       const files = req.files as Express.Multer.File[];
+      const albumId = normalizeParam(req.params.albumId);
 
       if (!files?.length) {
         return res.status(400).json({
@@ -87,7 +100,7 @@ router.post(
 
       const album = await prisma.eventAlbum.findFirst({
         where: {
-          id: req.params.albumId,
+          id: albumId,
           organizationId: req.user!.organizationId,
           deletedAt: null,
         },
@@ -169,6 +182,235 @@ router.post(
       return res.status(500).json({
         success: false,
         message: "Unable to upload photos",
+      });
+    }
+  },
+);
+
+router.patch(
+  "/albums/:albumId/photos/:photoId",
+  requireAuth,
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const albumId = normalizeParam(req.params.albumId);
+      const photoId = normalizeParam(req.params.photoId);
+      const caption =
+        typeof req.body.caption === "string"
+          ? req.body.caption.trim()
+          : undefined;
+
+      const photo = await prisma.albumPhoto.findFirst({
+        where: {
+          id: photoId,
+          albumId,
+          organizationId: req.user!.organizationId,
+        },
+      });
+
+      if (!photo) {
+        return res.status(404).json({
+          success: false,
+          message: "Photo not found",
+        });
+      }
+
+      const updated = await prisma.albumPhoto.update({
+        where: {
+          id: photo.id,
+        },
+        data: {
+          caption: caption === undefined ? undefined : caption || null,
+        },
+        include: {
+          mediaAsset: true,
+        },
+      });
+
+      return res.json({
+        success: true,
+        data: updated,
+      });
+    } catch (error) {
+      console.error("R2_PHOTO_UPDATE_ERROR:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to update photo",
+      });
+    }
+  },
+);
+
+router.patch(
+  "/albums/:albumId/photos/:photoId/cover",
+  requireAuth,
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const albumId = normalizeParam(req.params.albumId);
+      const photoId = normalizeParam(req.params.photoId);
+
+      const album = await prisma.eventAlbum.findFirst({
+        where: {
+          id: albumId,
+          organizationId: req.user!.organizationId,
+          deletedAt: null,
+        },
+      });
+
+      if (!album) {
+        return res.status(404).json({
+          success: false,
+          message: "Album not found",
+        });
+      }
+
+      const photo = await prisma.albumPhoto.findFirst({
+        where: {
+          id: photoId,
+          albumId: album.id,
+          organizationId: req.user!.organizationId,
+        },
+      });
+
+      if (!photo) {
+        return res.status(404).json({
+          success: false,
+          message: "Photo not found",
+        });
+      }
+
+      await prisma.albumPhoto.updateMany({
+        where: {
+          albumId: album.id,
+        },
+        data: {
+          isFeatured: false,
+        },
+      });
+
+      await prisma.albumPhoto.update({
+        where: {
+          id: photo.id,
+        },
+        data: {
+          isFeatured: true,
+        },
+      });
+
+      await prisma.eventAlbum.update({
+        where: {
+          id: album.id,
+        },
+        data: {
+          coverMediaId: photo.mediaAssetId,
+        },
+      });
+
+      await prisma.event.update({
+        where: {
+          id: album.eventId,
+        },
+        data: {
+          coverMediaId: photo.mediaAssetId,
+        },
+      });
+
+      return res.json({
+        success: true,
+      });
+    } catch (error) {
+      console.error("R2_PHOTO_COVER_ERROR:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to set cover photo",
+      });
+    }
+  },
+);
+
+router.delete(
+  "/albums/:albumId/photos/:photoId",
+  requireAuth,
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const albumId = normalizeParam(req.params.albumId);
+      const photoId = normalizeParam(req.params.photoId);
+
+      const photo = await prisma.albumPhoto.findFirst({
+        where: {
+          id: photoId,
+          albumId,
+          organizationId: req.user!.organizationId,
+        },
+        include: {
+          album: true,
+          mediaAsset: true,
+        },
+      });
+
+      if (!photo) {
+        return res.status(404).json({
+          success: false,
+          message: "Photo not found",
+        });
+      }
+
+      const objectKey =
+        typeof photo.mediaAsset.metadata === "object" &&
+        photo.mediaAsset.metadata !== null &&
+        "r2ObjectKey" in photo.mediaAsset.metadata
+          ? String(
+              (photo.mediaAsset.metadata as Record<string, unknown>)
+                .r2ObjectKey ?? "",
+            )
+          : objectKeyFromStorageKey(photo.mediaAsset.storageKey);
+
+      await prisma.albumPhoto.delete({
+        where: {
+          id: photo.id,
+        },
+      });
+
+      if (photo.album.coverMediaId === photo.mediaAssetId) {
+        await prisma.eventAlbum.update({
+          where: {
+            id: photo.album.id,
+          },
+          data: {
+            coverMediaId: null,
+          },
+        });
+
+        await prisma.event.update({
+          where: {
+            id: photo.album.eventId,
+          },
+          data: {
+            coverMediaId: null,
+          },
+        });
+      }
+
+      await prisma.mediaAsset.delete({
+        where: {
+          id: photo.mediaAsset.id,
+        },
+      });
+
+      if (objectKey) {
+        await workerEnv.MEDIA_BUCKET.delete(objectKey);
+      }
+
+      return res.json({
+        success: true,
+      });
+    } catch (error) {
+      console.error("R2_PHOTO_DELETE_ERROR:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to delete photo",
       });
     }
   },
