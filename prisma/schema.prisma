@@ -1,0 +1,587 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Organization {
+  id           String   @id @default(uuid()) @db.Uuid
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(200)
+  legalName    String?  @db.VarChar(300)
+  websiteUrl   String?  @db.VarChar(500)
+  email        String?  @db.VarChar(255)
+  phone        String?  @db.VarChar(50)
+  addressLine1 String?  @db.VarChar(250)
+  addressLine2 String?  @db.VarChar(250)
+  city         String?  @db.VarChar(100)
+  state        String?  @db.VarChar(100)
+  postalCode   String?  @db.VarChar(20)
+  country      String   @default("India") @db.VarChar(100)
+  logoMediaId  String?  @unique @db.Uuid
+  settings     Json     @default("{}")
+  customFields Json     @default("{}")
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  logoMedia             MediaAsset?          @relation("OrganizationLogo", fields: [logoMediaId], references: [id])
+  mediaAssets           MediaAsset[]         @relation("OrganizationMedia")
+  roles                 Role[]
+  adminUsers            AdminUser[]
+  members               Member[]
+  managementPositions   ManagementPosition[]
+  managementTerms       ManagementTerm[]
+  managementAssignments ManagementAssignment[]
+  socialWorkCategories  SocialWorkCategory[]
+  socialWorkItems       SocialWorkItem[]
+  events                Event[]
+  eventAlbums           EventAlbum[]
+  albumPhotos           AlbumPhoto[]
+  announcements         Announcement[]
+  contactRequests       ContactRequest[]
+  notifications         Notification[]
+  importBatches         ImportBatch[]
+  importRecords         ImportRecord[]
+  rejectedRecords       RejectedRecord[]
+  auditLogs             AuditLog[]
+  websiteSettings       WebsiteSetting?
+  dataExports           DataExport[]
+  systemBackups         SystemBackup[]
+}
+
+model MediaAsset {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @db.Uuid
+  storageProvider  String    @default("object_storage") @db.VarChar(50)
+  storageKey       String    @db.VarChar(1000)
+  originalFilename String?   @db.VarChar(500)
+  mimeType         String?   @db.VarChar(150)
+  fileSizeBytes    BigInt?
+  widthPx          Int?
+  heightPx         Int?
+  checksumSha256   String?   @db.Char(64)
+  altText          String?   @db.VarChar(500)
+  caption          String?
+  metadata         Json      @default("{}")
+  customFields     Json      @default("{}")
+  isPublic         Boolean   @default(true)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt        DateTime? @db.Timestamptz(6)
+
+  organization      Organization  @relation("OrganizationMedia", fields: [organizationId], references: [id])
+  organizationLogo  Organization? @relation("OrganizationLogo")
+  memberProfiles    Member[]      @relation("MemberProfileMedia")
+  socialWorkCovers  SocialWorkItem[] @relation("SocialWorkCoverMedia")
+  eventCovers       Event[]       @relation("EventCoverMedia")
+  albumCovers       EventAlbum[]  @relation("AlbumCoverMedia")
+  albumPhotos       AlbumPhoto[]
+  announcementCovers Announcement[] @relation("AnnouncementCoverMedia")
+  importStorage     ImportBatch[] @relation("ImportStorageMedia")
+  rejectedOutputs   RejectedRecord[] @relation("RejectedOutputMedia")
+  exportStorage     DataExport[]  @relation("ExportStorageMedia")
+  backupStorage     SystemBackup[] @relation("BackupStorageMedia")
+
+  @@unique([organizationId, storageKey])
+  @@index([organizationId])
+}
+
+model Role {
+  id           String   @id @default(uuid()) @db.Uuid
+  organizationId String @db.Uuid
+  code         String   @db.VarChar(80)
+  name         String   @db.VarChar(150)
+  description  String?
+  isSystemRole Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id])
+  permissions  RolePermission[]
+  users        AdminUserRole[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique @db.VarChar(120)
+  name        String   @db.VarChar(180)
+  module      String   @db.VarChar(100)
+  description String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model AdminUser {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  email          String    @db.VarChar(255)
+  passwordHash   String
+  displayName    String    @db.VarChar(200)
+  phone          String?   @db.VarChar(50)
+  status         String    @default("active") @db.VarChar(30)
+  lastLoginAt    DateTime? @db.Timestamptz(6)
+  metadata       Json      @default("{}")
+  customFields   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization    Organization      @relation(fields: [organizationId], references: [id])
+  roles           AdminUserRole[]
+  assignedContacts ContactRequest[]
+  notifications   Notification[]
+  imports         ImportBatch[]
+  rejectedRecords RejectedRecord[]
+  auditLogs       AuditLog[]
+  updatedSettings WebsiteSetting[]
+  exports         DataExport[]
+  backups         SystemBackup[]
+
+  @@unique([organizationId, email])
+  @@index([organizationId])
+}
+
+model AdminUserRole {
+  adminUserId String @db.Uuid
+  roleId      String @db.Uuid
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  role      Role      @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([adminUserId, roleId])
+}
+
+model Member {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @db.Uuid
+  memberCode       String?   @db.VarChar(80)
+  firstName        String    @db.VarChar(120)
+  middleName       String?   @db.VarChar(120)
+  lastName         String?   @db.VarChar(120)
+  displayName      String?   @db.VarChar(250)
+  gender           String?   @db.VarChar(50)
+  dateOfBirth      DateTime? @db.Date
+  phone            String?   @db.VarChar(50)
+  email            String?   @db.VarChar(255)
+  addressLine1     String?   @db.VarChar(250)
+  addressLine2     String?   @db.VarChar(250)
+  city             String?   @db.VarChar(100)
+  state            String?   @db.VarChar(100)
+  postalCode       String?   @db.VarChar(20)
+  country          String    @default("India") @db.VarChar(100)
+  profileMediaId   String?   @db.Uuid
+  membershipStatus String    @default("active") @db.VarChar(50)
+  joinedOn         DateTime? @db.Date
+  notes            String?
+  metadata         Json      @default("{}")
+  customFields     Json      @default("{}")
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt        DateTime? @db.Timestamptz(6)
+
+  organization  Organization           @relation(fields: [organizationId], references: [id])
+  profileMedia  MediaAsset?            @relation("MemberProfileMedia", fields: [profileMediaId], references: [id])
+  assignments   ManagementAssignment[]
+
+  @@index([organizationId, lastName, firstName])
+  @@index([organizationId, memberCode])
+}
+
+model ManagementPosition {
+  id            String   @id @default(uuid()) @db.Uuid
+  organizationId String  @db.Uuid
+  code          String   @db.VarChar(80)
+  name          String   @db.VarChar(150)
+  displayOrder  Int      @default(0)
+  description   String?
+  isActive      Boolean  @default(true)
+  customFields  Json     @default("{}")
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization           @relation(fields: [organizationId], references: [id])
+  assignments  ManagementAssignment[]
+
+  @@unique([organizationId, code])
+}
+
+model ManagementTerm {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  name           String   @db.VarChar(180)
+  startDate      DateTime @db.Date
+  endDate        DateTime? @db.Date
+  status         String   @default("active") @db.VarChar(30)
+  notes          String?
+  customFields   Json     @default("{}")
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization           @relation(fields: [organizationId], references: [id])
+  assignments  ManagementAssignment[]
+}
+
+model ManagementAssignment {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  termId         String    @db.Uuid
+  positionId     String    @db.Uuid
+  memberId       String    @db.Uuid
+  startDate      DateTime? @db.Date
+  endDate        DateTime? @db.Date
+  displayOrder   Int       @default(0)
+  notes          String?
+  customFields   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization Organization       @relation(fields: [organizationId], references: [id])
+  term         ManagementTerm     @relation(fields: [termId], references: [id])
+  position     ManagementPosition @relation(fields: [positionId], references: [id])
+  member       Member             @relation(fields: [memberId], references: [id])
+
+  @@index([organizationId])
+  @@index([termId])
+  @@index([memberId])
+}
+
+model SocialWorkCategory {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  code           String   @db.VarChar(80)
+  name           String   @db.VarChar(180)
+  description    String?
+  iconKey        String?  @db.VarChar(100)
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
+  customFields   Json     @default("{}")
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id])
+  items        SocialWorkItem[]
+
+  @@unique([organizationId, code])
+}
+
+model SocialWorkItem {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  categoryId     String?   @db.Uuid
+  title          String    @db.VarChar(250)
+  slug           String    @db.VarChar(300)
+  summary        String?
+  description    String?
+  startDate      DateTime? @db.Date
+  endDate        DateTime? @db.Date
+  status         String    @default("published") @db.VarChar(50)
+  coverMediaId   String?   @db.Uuid
+  displayOrder   Int       @default(0)
+  publishedAt    DateTime? @db.Timestamptz(6)
+  metadata       Json      @default("{}")
+  customFields   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization         @relation(fields: [organizationId], references: [id])
+  category     SocialWorkCategory?  @relation(fields: [categoryId], references: [id])
+  coverMedia   MediaAsset?          @relation("SocialWorkCoverMedia", fields: [coverMediaId], references: [id])
+
+  @@unique([organizationId, slug])
+}
+
+model Event {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  title          String    @db.VarChar(250)
+  slug           String    @db.VarChar(300)
+  category       String?   @db.VarChar(100)
+  summary        String?
+  description    String?
+  venue          String?   @db.VarChar(300)
+  startAt        DateTime? @db.Timestamptz(6)
+  endAt          DateTime? @db.Timestamptz(6)
+  status         String    @default("published") @db.VarChar(50)
+  coverMediaId   String?   @db.Uuid
+  publishedAt    DateTime? @db.Timestamptz(6)
+  metadata       Json      @default("{}")
+  customFields   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  coverMedia   MediaAsset?  @relation("EventCoverMedia", fields: [coverMediaId], references: [id])
+  album        EventAlbum?
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, startAt])
+}
+
+model EventAlbum {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  eventId        String    @unique @db.Uuid
+  title          String    @db.VarChar(250)
+  description    String?
+  coverMediaId   String?   @db.Uuid
+  publishedAt    DateTime? @db.Timestamptz(6)
+  customFields   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  event        Event        @relation(fields: [eventId], references: [id])
+  coverMedia   MediaAsset?  @relation("AlbumCoverMedia", fields: [coverMediaId], references: [id])
+  photos       AlbumPhoto[]
+}
+
+model AlbumPhoto {
+  id           String   @id @default(uuid()) @db.Uuid
+  organizationId String @db.Uuid
+  albumId      String   @db.Uuid
+  mediaAssetId String   @db.Uuid
+  displayOrder Int      @default(0)
+  caption      String?
+  isFeatured   Boolean  @default(false)
+  customFields Json     @default("{}")
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  album        EventAlbum   @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  mediaAsset   MediaAsset   @relation(fields: [mediaAssetId], references: [id])
+
+  @@unique([albumId, mediaAssetId])
+  @@index([albumId, displayOrder])
+}
+
+model Announcement {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  title          String    @db.VarChar(250)
+  slug           String    @db.VarChar(300)
+  summary        String?
+  body           String
+  status         String    @default("published") @db.VarChar(50)
+  publishedAt    DateTime? @db.Timestamptz(6)
+  expiresAt      DateTime? @db.Timestamptz(6)
+  coverMediaId   String?   @db.Uuid
+  metadata       Json      @default("{}")
+  customFields   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  coverMedia   MediaAsset?  @relation("AnnouncementCoverMedia", fields: [coverMediaId], references: [id])
+
+  @@unique([organizationId, slug])
+}
+
+model ContactRequest {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  name           String    @db.VarChar(200)
+  email          String?   @db.VarChar(255)
+  phone          String?   @db.VarChar(50)
+  subject        String?   @db.VarChar(250)
+  message        String
+  status         String    @default("new") @db.VarChar(50)
+  assignedTo     String?   @db.Uuid
+  respondedAt    DateTime? @db.Timestamptz(6)
+  metadata       Json      @default("{}")
+  customFields   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  assignee     AdminUser?   @relation(fields: [assignedTo], references: [id])
+
+  @@index([organizationId, status])
+}
+
+model Notification {
+  id           String    @id @default(uuid()) @db.Uuid
+  organizationId String  @db.Uuid
+  adminUserId  String?   @db.Uuid
+  type         String    @db.VarChar(80)
+  title        String    @db.VarChar(250)
+  message      String
+  linkUrl      String?   @db.VarChar(1000)
+  isRead       Boolean   @default(false)
+  readAt       DateTime? @db.Timestamptz(6)
+  metadata     Json      @default("{}")
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  adminUser    AdminUser?   @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId, isRead])
+}
+
+model ImportBatch {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @db.Uuid
+  uploadedBy       String?   @db.Uuid
+  entityType       String    @db.VarChar(100)
+  originalFilename String    @db.VarChar(500)
+  storageMediaId   String?   @db.Uuid
+  status           String    @default("uploaded") @db.VarChar(50)
+  totalRecords     Int       @default(0)
+  acceptedRecords  Int       @default(0)
+  rejectedRecords  Int       @default(0)
+  committedRecords Int       @default(0)
+  startedAt        DateTime? @db.Timestamptz(6)
+  completedAt      DateTime? @db.Timestamptz(6)
+  metadata         Json      @default("{}")
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  uploader     AdminUser?   @relation(fields: [uploadedBy], references: [id])
+  storageMedia MediaAsset?  @relation("ImportStorageMedia", fields: [storageMediaId], references: [id])
+  records      ImportRecord[]
+
+  @@index([organizationId, status])
+}
+
+model ImportRecord {
+  id              String    @id @default(uuid()) @db.Uuid
+  organizationId  String    @db.Uuid
+  batchId         String    @db.Uuid
+  rowNumber       Int
+  recordKey       String?   @db.VarChar(250)
+  status          String    @default("pending") @db.VarChar(30)
+  sourceData      Json      @default("{}")
+  normalizedData  Json      @default("{}")
+  validationErrors Json     @default("[]")
+  targetEntityId  String?   @db.Uuid
+  processedAt     DateTime? @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization Organization    @relation(fields: [organizationId], references: [id])
+  batch        ImportBatch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  rejection    RejectedRecord?
+
+  @@unique([batchId, rowNumber])
+  @@index([batchId, status])
+}
+
+model RejectedRecord {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @db.Uuid
+  importRecordId   String    @unique @db.Uuid
+  rejectionCode    String    @db.VarChar(100)
+  rejectionReason  String
+  correctionStatus String    @default("open") @db.VarChar(50)
+  correctedData    Json      @default("{}")
+  resolvedBy       String?   @db.Uuid
+  resolvedAt       DateTime? @db.Timestamptz(6)
+  outputFileMediaId String?  @db.Uuid
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization     Organization  @relation(fields: [organizationId], references: [id])
+  importRecord     ImportRecord  @relation(fields: [importRecordId], references: [id], onDelete: Cascade)
+  resolver         AdminUser?    @relation(fields: [resolvedBy], references: [id])
+  outputFileMedia  MediaAsset?   @relation("RejectedOutputMedia", fields: [outputFileMediaId], references: [id])
+}
+
+model AuditLog {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  actorUserId    String?   @db.Uuid
+  action         String    @db.VarChar(100)
+  entityType     String?   @db.VarChar(100)
+  entityId       String?   @db.Uuid
+  requestId      String?   @db.VarChar(100)
+  ipAddress      String?   @db.VarChar(100)
+  userAgent      String?
+  beforeData     Json?
+  afterData      Json?
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  actor        AdminUser?   @relation(fields: [actorUserId], references: [id])
+
+  @@index([organizationId, createdAt])
+}
+
+model WebsiteSetting {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @unique @db.Uuid
+  siteTitle      String?   @db.VarChar(250)
+  tagline        String?   @db.VarChar(500)
+  contactEmail   String?   @db.VarChar(255)
+  contactPhone   String?   @db.VarChar(50)
+  address        String?
+  socialLinks    Json      @default("{}")
+  featureFlags   Json      @default("{}")
+  publicSettings Json      @default("{}")
+  customFields   Json      @default("{}")
+  updatedBy      String?   @db.Uuid
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  updater      AdminUser?   @relation(fields: [updatedBy], references: [id])
+}
+
+model DataExport {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  requestedBy    String?   @db.Uuid
+  entityType     String    @db.VarChar(100)
+  format         String    @db.VarChar(30)
+  status         String    @default("queued") @db.VarChar(30)
+  storageMediaId String?   @db.Uuid
+  filters        Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  completedAt    DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  requester    AdminUser?   @relation(fields: [requestedBy], references: [id])
+  storageMedia MediaAsset?  @relation("ExportStorageMedia", fields: [storageMediaId], references: [id])
+}
+
+model SystemBackup {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  requestedBy    String?   @db.Uuid
+  storageMediaId String?   @db.Uuid
+  status         String    @default("started") @db.VarChar(30)
+  backupType     String    @default("database") @db.VarChar(50)
+  checksumSha256 String?   @db.Char(64)
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  completedAt    DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  requester    AdminUser?   @relation(fields: [requestedBy], references: [id])
+  storageMedia MediaAsset?  @relation("BackupStorageMedia", fields: [storageMediaId], references: [id])
+}

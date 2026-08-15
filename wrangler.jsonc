@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "asrgh-api",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "JWT_EXPIRES_IN": "8h"
+  },
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "asrgh-media"
+    }
+  ]
+}
