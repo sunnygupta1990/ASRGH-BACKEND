@@ -7,8 +7,14 @@ import authRouter from "./routes/auth";
 import adminRouter from "./routes/admin";
 import membersRouter from "./routes/members";
 import eventsRouter from "./routes/events";
+import { AppPrisma } from "./config/prisma";
 
-export function createApp(photosRouter: Router) {
+export type PrismaProvider = () => AppPrisma;
+
+export function createApp(
+  getPrisma: PrismaProvider,
+  photosRouter: Router,
+) {
   const app = express();
 
   app.set("json replacer", (_key: string, value: unknown) =>
@@ -45,6 +51,11 @@ export function createApp(photosRouter: Router) {
 
   app.use(express.json());
 
+  app.use((req, _res, next) => {
+    (req as RequestWithPrisma).prisma = getPrisma();
+    next();
+  });
+
   app.get("/api/health", (_req, res) => {
     res.json({
       success: true,
@@ -60,4 +71,8 @@ export function createApp(photosRouter: Router) {
   app.use("/api", photosRouter);
 
   return app;
+}
+
+interface RequestWithPrisma extends express.Request {
+  prisma: AppPrisma;
 }

@@ -2,8 +2,9 @@
 
 import { env } from "cloudflare:workers";
 import { httpServerHandler } from "cloudflare:node";
-import photosRouter from "./routes/photos.worker";
+import { createRequestPrismaClient } from "./config/prisma";
 import { createApp } from "./app";
+import photosRouter from "./routes/photos.worker";
 
 type R2LikeObject = {
   body: ReadableStream;
@@ -20,10 +21,15 @@ type R2LikeBucket = {
 
 type CloudflareEnv = {
   MEDIA_BUCKET: R2LikeBucket;
+  DATABASE_URL: string;
 };
 
 const workerEnv = env as unknown as CloudflareEnv;
-const app = createApp(photosRouter);
+
+const app = createApp(
+  () => createRequestPrismaClient(workerEnv.DATABASE_URL),
+  photosRouter,
+);
 
 app.get("/media/*path", async (req, res) => {
   try {
@@ -31,6 +37,7 @@ app.get("/media/*path", async (req, res) => {
     const pathValue = Array.isArray(wildcard)
       ? wildcard.join("/")
       : String(wildcard ?? "");
+
     const key = pathValue.replace(/^\/+/, "");
 
     if (!key) {
@@ -48,16 +55,20 @@ app.get("/media/*path", async (req, res) => {
 
     res.setHeader(
       "Content-Type",
-      object.httpMetadata?.contentType ?? "application/octet-stream",
+      object.httpMetadata?.contentType ??
+        "application/octet-stream",
     );
+
     res.setHeader(
       "Cache-Control",
       object.httpMetadata?.cacheControl ??
         "public, max-age=3600",
     );
+
     res.setHeader("ETag", object.httpEtag);
 
     const bytes = await new Response(object.body).arrayBuffer();
+
     return res.send(Buffer.from(bytes));
   } catch (error) {
     console.error("R2_MEDIA_READ_ERROR:", error);
