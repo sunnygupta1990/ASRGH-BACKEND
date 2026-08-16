@@ -3,11 +3,16 @@
 import { env } from "cloudflare:workers";
 import { Router } from "express";
 import multer from "multer";
-import { prisma } from "../config/prisma";
 import {
   AuthenticatedRequest,
   requireAuth,
 } from "../middleware/requireAuth";
+import {
+  deletePhoto,
+  setPhotoAsCover,
+  updatePhotoCaption,
+} from "../services/photo.service";
+import { normalizeParam } from "../utils/routeParams";
 
 const router = Router();
 
@@ -58,10 +63,6 @@ const upload = multer({
   },
 });
 
-function normalizeParam(value: string | string[] | undefined): string {
-  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
-}
-
 function extensionForMimeType(mimeType: string): string {
   const extensions: Record<string, string> = {
     "image/jpeg": "jpg",
@@ -98,7 +99,7 @@ router.post(
         });
       }
 
-      const album = await prisma.eventAlbum.findFirst({
+      const album = await req.prisma.eventAlbum.findFirst({
         where: {
           id: albumId,
           organizationId: req.user!.organizationId,
@@ -113,7 +114,7 @@ router.post(
         });
       }
 
-      const existingCount = await prisma.albumPhoto.count({
+      const existingCount = await req.prisma.albumPhoto.count({
         where: {
           albumId: album.id,
         },
@@ -138,7 +139,7 @@ router.post(
         });
 
         try {
-          const mediaAsset = await prisma.mediaAsset.create({
+          const mediaAsset = await req.prisma.mediaAsset.create({
             data: {
               organizationId: req.user!.organizationId,
               storageProvider: "cloudflare-r2",
@@ -153,7 +154,7 @@ router.post(
             },
           });
 
-          const albumPhoto = await prisma.albumPhoto.create({
+          const albumPhoto = await req.prisma.albumPhoto.create({
             data: {
               organizationId: req.user!.organizationId,
               albumId: album.id,
@@ -199,32 +200,22 @@ router.patch(
           ? req.body.caption.trim()
           : undefined;
 
-      const photo = await prisma.albumPhoto.findFirst({
-        where: {
-          id: photoId,
-          albumId,
+      const updated = await updatePhotoCaption(
+        {
+          prisma: req.prisma,
           organizationId: req.user!.organizationId,
         },
-      });
+        albumId,
+        photoId,
+        caption,
+      );
 
-      if (!photo) {
+      if (!updated) {
         return res.status(404).json({
           success: false,
           message: "Photo not found",
         });
       }
-
-      const updated = await prisma.albumPhoto.update({
-        where: {
-          id: photo.id,
-        },
-        data: {
-          caption: caption === undefined ? undefined : caption || null,
-        },
-        include: {
-          mediaAsset: true,
-        },
-      });
 
       return res.json({
         success: true,
@@ -249,71 +240,21 @@ router.patch(
       const albumId = normalizeParam(req.params.albumId);
       const photoId = normalizeParam(req.params.photoId);
 
-      const album = await prisma.eventAlbum.findFirst({
-        where: {
-          id: albumId,
-          organizationId: req.user!.organizationId,
-          deletedAt: null,
-        },
-      });
-
-      if (!album) {
-        return res.status(404).json({
-          success: false,
-          message: "Album not found",
-        });
-      }
-
-      const photo = await prisma.albumPhoto.findFirst({
-        where: {
-          id: photoId,
-          albumId: album.id,
+      const updated = await setPhotoAsCover(
+        {
+          prisma: req.prisma,
           organizationId: req.user!.organizationId,
         },
-      });
+        albumId,
+        photoId,
+      );
 
-      if (!photo) {
+      if (!updated) {
         return res.status(404).json({
           success: false,
-          message: "Photo not found",
+          message: "Album or photo not found",
         });
       }
-
-      await prisma.albumPhoto.updateMany({
-        where: {
-          albumId: album.id,
-        },
-        data: {
-          isFeatured: false,
-        },
-      });
-
-      await prisma.albumPhoto.update({
-        where: {
-          id: photo.id,
-        },
-        data: {
-          isFeatured: true,
-        },
-      });
-
-      await prisma.eventAlbum.update({
-        where: {
-          id: album.id,
-        },
-        data: {
-          coverMediaId: photo.mediaAssetId,
-        },
-      });
-
-      await prisma.event.update({
-        where: {
-          id: album.eventId,
-        },
-        data: {
-          coverMediaId: photo.mediaAssetId,
-        },
-      });
 
       return res.json({
         success: true,
@@ -337,69 +278,24 @@ router.delete(
       const albumId = normalizeParam(req.params.albumId);
       const photoId = normalizeParam(req.params.photoId);
 
-      const photo = await prisma.albumPhoto.findFirst({
-        where: {
-          id: photoId,
-          albumId,
+      const storage = await deletePhoto(
+        {
+          prisma: req.prisma,
           organizationId: req.user!.organizationId,
         },
-        include: {
-          album: true,
-          mediaAsset: true,
-        },
-      });
+        albumId,
+        photoId,
+      );
 
-      if (!photo) {
+      if (!storage) {
         return res.status(404).json({
           success: false,
           message: "Photo not found",
         });
       }
 
-      const objectKey =
-        typeof photo.mediaAsset.metadata === "object" &&
-        photo.mediaAsset.metadata !== null &&
-        "r2ObjectKey" in photo.mediaAsset.metadata
-          ? String(
-              (photo.mediaAsset.metadata as Record<string, unknown>)
-                .r2ObjectKey ?? "",
-            )
-          : objectKeyFromStorageKey(photo.mediaAsset.storageKey);
-
-      await prisma.albumPhoto.delete({
-        where: {
-          id: photo.id,
-        },
-      });
-
-      if (photo.album.coverMediaId === photo.mediaAssetId) {
-        await prisma.eventAlbum.update({
-          where: {
-            id: photo.album.id,
-          },
-          data: {
-            coverMediaId: null,
-          },
-        });
-
-        await prisma.event.update({
-          where: {
-            id: photo.album.eventId,
-          },
-          data: {
-            coverMediaId: null,
-          },
-        });
-      }
-
-      await prisma.mediaAsset.delete({
-        where: {
-          id: photo.mediaAsset.id,
-        },
-      });
-
-      if (objectKey) {
-        await workerEnv.MEDIA_BUCKET.delete(objectKey);
+      if (storage.r2ObjectKey) {
+        await env.MEDIA_BUCKET.delete(storage.r2ObjectKey);
       }
 
       return res.json({

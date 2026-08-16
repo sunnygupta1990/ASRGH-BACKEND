@@ -2,7 +2,6 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../config/prisma";
 import {
   AuthenticatedRequest,
   requireAuth,
@@ -23,7 +22,7 @@ const eventSchema = z.object({
 });
 
 router.get("/", requireAuth, async (req: AuthenticatedRequest, res) => {
-  const events = await prisma.event.findMany({
+  const events = await req.prisma.event.findMany({
     where: {
       organizationId: req.user!.organizationId,
       deletedAt: null,
@@ -57,7 +56,7 @@ router.post("/", requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const data = eventSchema.parse(req.body);
 
-    const event = await prisma.event.create({
+    const event = await req.prisma.event.create({
       data: {
         organizationId: req.user!.organizationId,
         title: data.title,
@@ -103,7 +102,7 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const data = eventSchema.partial().parse(req.body);
 
-    const existing = await prisma.event.findFirst({
+    const existing = await req.prisma.event.findFirst({
       where: {
         id: String(req.params.id),
         organizationId: req.user!.organizationId,
@@ -118,7 +117,7 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
       });
     }
 
-    const event = await prisma.event.update({
+    const event = await req.prisma.event.update({
       where: {
         id: existing.id,
       },
@@ -161,7 +160,7 @@ router.patch(
   "/:id/archive",
   requireAuth,
   async (req: AuthenticatedRequest, res) => {
-    const existing = await prisma.event.findFirst({
+    const existing = await req.prisma.event.findFirst({
       where: {
         id: String(req.params.id),
         organizationId: req.user!.organizationId,
@@ -176,7 +175,7 @@ router.patch(
       });
     }
 
-    const event = await prisma.event.update({
+    const event = await req.prisma.event.update({
       where: {
         id: existing.id,
       },

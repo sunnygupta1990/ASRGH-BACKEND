@@ -1,7 +1,8 @@
+// backened/src/routes/members.ts
+
 import { Router } from "express";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
-import { prisma } from "../config/prisma";
 import {
   AuthenticatedRequest,
   requireAuth,
@@ -33,12 +34,15 @@ const memberUpdateSchema = memberSchema.partial();
 function toPrismaCustomFields(
   value: Record<string, unknown> | undefined,
 ): Prisma.InputJsonValue | undefined {
-  if (!value) return undefined;
+  if (!value) {
+    return undefined;
+  }
+
   return value as Prisma.InputJsonValue;
 }
 
 router.get("/", requireAuth, async (req: AuthenticatedRequest, res) => {
-  const members = await prisma.member.findMany({
+  const members = await req.prisma.member.findMany({
     where: {
       organizationId: req.user!.organizationId,
       deletedAt: null,
@@ -46,14 +50,17 @@ router.get("/", requireAuth, async (req: AuthenticatedRequest, res) => {
     orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
   });
 
-  return res.json({ success: true, data: members });
+  return res.json({
+    success: true,
+    data: members,
+  });
 });
 
 router.post("/", requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const data = memberSchema.parse(req.body);
 
-    const member = await prisma.member.create({
+    const member = await req.prisma.member.create({
       data: {
         organizationId: req.user!.organizationId,
         memberCode: data.memberCode,
@@ -75,9 +82,13 @@ router.post("/", requireAuth, async (req: AuthenticatedRequest, res) => {
       },
     });
 
-    return res.status(201).json({ success: true, data: member });
+    return res.status(201).json({
+      success: true,
+      data: member,
+    });
   } catch (error) {
     console.error("Create member failed", error);
+
     return res.status(400).json({
       success: false,
       message: "Invalid member data or duplicate member code",
@@ -89,7 +100,7 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const data = memberUpdateSchema.parse(req.body);
 
-    const existing = await prisma.member.findFirst({
+    const existing = await req.prisma.member.findFirst({
       where: {
         id: String(req.params.id),
         organizationId: req.user!.organizationId,
@@ -115,8 +126,10 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
       ? { ...existingCustomFields, ...data.customFields }
       : undefined;
 
-    const member = await prisma.member.update({
-      where: { id: existing.id },
+    const member = await req.prisma.member.update({
+      where: {
+        id: existing.id,
+      },
       data: {
         memberCode: data.memberCode,
         firstName: data.firstName,
@@ -131,15 +144,21 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
         state: data.state,
         postalCode: data.postalCode,
         membershipStatus: data.membershipStatus,
-        joinedOn: data.joinedOn ? new Date(data.joinedOn) : undefined,
+        joinedOn: data.joinedOn
+          ? new Date(data.joinedOn)
+          : undefined,
         notes: data.notes,
         customFields: toPrismaCustomFields(mergedCustomFields),
       },
     });
 
-    return res.json({ success: true, data: member });
+    return res.json({
+      success: true,
+      data: member,
+    });
   } catch (error) {
     console.error("Update member failed", error);
+
     return res.status(400).json({
       success: false,
       message: "Invalid member data or duplicate member code",
@@ -147,57 +166,74 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
   }
 });
 
-router.patch("/:id/archive", requireAuth, async (req: AuthenticatedRequest, res) => {
-  const existing = await prisma.member.findFirst({
-    where: {
-      id: String(req.params.id),
-      organizationId: req.user!.organizationId,
-      deletedAt: null,
-    },
-  });
-
-  if (!existing) {
-    return res.status(404).json({
-      success: false,
-      message: "Member not found",
+router.patch(
+  "/:id/archive",
+  requireAuth,
+  async (req: AuthenticatedRequest, res) => {
+    const existing = await req.prisma.member.findFirst({
+      where: {
+        id: String(req.params.id),
+        organizationId: req.user!.organizationId,
+        deletedAt: null,
+      },
     });
-  }
 
-  const member = await prisma.member.update({
-    where: { id: existing.id },
-    data: { membershipStatus: "archived" },
-  });
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
 
-  return res.json({ success: true, data: member });
-});
-
-
-router.delete("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
-  const existing = await prisma.member.findFirst({
-    where: {
-      id: String(req.params.id),
-      organizationId: req.user!.organizationId,
-      deletedAt: null,
-    },
-  });
-
-  if (!existing) {
-    return res.status(404).json({
-      success: false,
-      message: "Member not found",
+    const member = await req.prisma.member.update({
+      where: {
+        id: existing.id,
+      },
+      data: {
+        membershipStatus: "archived",
+      },
     });
-  }
 
-  await prisma.member.update({
-    where: { id: existing.id },
-    data: {
-      deletedAt: new Date(),
-      membershipStatus: "deleted",
-    },
-  });
+    return res.json({
+      success: true,
+      data: member,
+    });
+  },
+);
 
-  return res.json({ success: true });
-});
+router.delete(
+  "/:id",
+  requireAuth,
+  async (req: AuthenticatedRequest, res) => {
+    const existing = await req.prisma.member.findFirst({
+      where: {
+        id: String(req.params.id),
+        organizationId: req.user!.organizationId,
+        deletedAt: null,
+      },
+    });
+
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+
+    await req.prisma.member.update({
+      where: {
+        id: existing.id,
+      },
+      data: {
+        deletedAt: new Date(),
+        membershipStatus: "deleted",
+      },
+    });
+
+    return res.json({
+      success: true,
+    });
+  },
+);
 
 export default router;
-

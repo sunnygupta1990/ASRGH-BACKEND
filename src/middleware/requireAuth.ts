@@ -1,15 +1,25 @@
-﻿import { NextFunction, Request, Response } from "express";
-import jwt from "jsonwebtoken";
+﻿// backened/src/middleware/requireAuth.ts
 
-export interface AuthenticatedRequest extends Request {
-  user?: {
-    userId: string;
-    organizationId: string;
-  };
+import { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
+import { AppPrisma } from "../config/prisma";
+
+declare global {
+  namespace Express {
+    interface Request {
+      prisma: AppPrisma;
+      user?: {
+        userId: string;
+        organizationId: string;
+      };
+    }
+  }
 }
 
+export type AuthenticatedRequest = Request;
+
 export function requireAuth(
-  req: AuthenticatedRequest,
+  req: Request,
   res: Response,
   next: NextFunction,
 ) {

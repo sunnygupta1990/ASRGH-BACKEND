@@ -1,5 +1,6 @@
-﻿import { Router } from "express";
-import { prisma } from "../config/prisma";
+﻿// backened/src/routes/admin.ts
+
+import { Router } from "express";
 import {
   AuthenticatedRequest,
   requireAuth,
@@ -11,7 +12,7 @@ router.get(
   "/me",
   requireAuth,
   async (req: AuthenticatedRequest, res) => {
-    const user = await prisma.adminUser.findUnique({
+    const user = await req.prisma.adminUser.findUnique({
       where: { id: req.user!.userId },
       select: {
         id: true,

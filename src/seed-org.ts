@@ -1,4 +1,6 @@
-﻿import { prisma } from "./config/prisma";
+import { createPrismaClient } from "./config/prisma";
+
+const prisma = createPrismaClient();
 
 async function main() {
   await prisma.organization.upsert({

@@ -1,4 +1,6 @@
-﻿import { prisma } from "./config/prisma";
+import { createPrismaClient } from "./config/prisma";
+
+const prisma = createPrismaClient();
 
 async function main() {
   const count = await prisma.organization.count();
