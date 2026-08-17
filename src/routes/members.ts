@@ -11,6 +11,7 @@ import { PERMISSIONS, requirePermission } from "../auth/permissions";
 import { requestAuditContext, withAudit } from "../services/audit.service";
 
 const router = Router();
+const memberEmailSchema = z.string().email().or(z.literal(""));
 
 const memberSchema = z.object({
   memberCode: z.string().trim().min(1).optional(),
@@ -21,7 +22,7 @@ const memberSchema = z.object({
   gender: z.string().trim().optional(),
   dateOfBirth: z.string().date().nullable().optional(),
   phone: z.string().trim().optional(),
-  email: z.string().email().optional().or(z.literal("")),
+  email: memberEmailSchema.optional(),
   addressLine1: z.string().trim().optional(),
   addressLine2: z.string().trim().optional(),
   city: z.string().trim().optional(),
@@ -36,7 +37,16 @@ const memberSchema = z.object({
   customFields: z.record(z.string(), z.unknown()).optional(),
 }).strict();
 
-const memberUpdateSchema = memberSchema.partial().extend({ membershipStatus: z.enum(["active", "archived"]).optional() });
+const memberUpdateSchema = memberSchema.partial().extend({
+  email: z.string().optional(),
+  membershipStatus: z.enum(["active", "archived"]).optional(),
+});
+
+function memberValidationMessage(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => `${issue.path.join(".") || "member"}: ${issue.message}`)
+    .join("; ");
+}
 
 function toPrismaCustomFields(
   value: Record<string, unknown> | undefined,
@@ -138,7 +148,9 @@ router.post("/", requireAuth, requirePermission(PERMISSIONS.membersWrite), async
 
     return res.status(400).json({
       success: false,
-      message: "Invalid member data or duplicate member code",
+      message: error instanceof z.ZodError
+        ? memberValidationMessage(error)
+        : "Unable to create member",
     });
   }
 });
@@ -161,6 +173,16 @@ router.put("/:id", requireAuth, requirePermission(PERMISSIONS.membersWrite), asy
         success: false,
         message: "Member not found",
       });
+    }
+
+    if (data.email !== undefined && data.email !== existing.email) {
+      const emailResult = memberEmailSchema.safeParse(data.email);
+      if (!emailResult.success) {
+        return res.status(400).json({
+          success: false,
+          message: `email: ${emailResult.error.issues[0]?.message ?? "Invalid email address"}`,
+        });
+      }
     }
 
     if (data.memberCode && data.memberCode !== existing.memberCode) {
@@ -235,7 +257,9 @@ router.put("/:id", requireAuth, requirePermission(PERMISSIONS.membersWrite), asy
 
     return res.status(400).json({
       success: false,
-      message: "Invalid member data or duplicate member code",
+      message: error instanceof z.ZodError
+        ? memberValidationMessage(error)
+        : "Unable to update member",
     });
   }
 });

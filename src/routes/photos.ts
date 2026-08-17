@@ -1,6 +1,7 @@
 // backened/src/routes/photos.ts
 
 import { Router } from "express";
+import { Prisma } from "@prisma/client";
 import multer from "multer";
 import sharp from "sharp";
 import path from "path";
@@ -21,6 +22,13 @@ import {
 import { normalizeParam } from "../utils/routeParams";
 
 const router = Router();
+
+function withoutLegacyPhotoUrl(value: Prisma.JsonValue): Prisma.InputJsonObject {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const { photo_url: _legacyPhotoUrl, ...copy } = value;
+  return copy;
+}
+
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -49,6 +57,244 @@ function storagePathFromKey(storageKey: string): string | null {
 
   return null;
 }
+
+
+const profileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 2 * 1024 * 1024,
+    files: 1,
+  },
+  fileFilter: (_req, file, callback) => {
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)) {
+      callback(new Error("Profile photo must be JPG, PNG, or WebP"));
+      return;
+    }
+
+    callback(null, true);
+  },
+});
+
+function profileUploadMiddleware(req: AuthenticatedRequest, res: any, next: any) {
+  profileUpload.single("profilePhoto")(req, res, (error: any) => {
+    if (error) {
+      if (error.code === "LIMIT_FILE_SIZE") {
+        return res.status(413).json({
+          success: false,
+          message: "Profile photo must be 2 MB or smaller",
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: error instanceof Error ? error.message : "Invalid profile photo",
+      });
+    }
+
+    next();
+  });
+}
+
+router.post(
+  "/members/:memberId/profile-photo",
+  requireAuth,
+  requirePermission(PERMISSIONS.membersWrite),
+  profileUploadMiddleware,
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const memberId = normalizeParam(req.params.memberId);
+      const file = req.file;
+
+      if (!file) {
+        return res.status(400).json({
+          success: false,
+          message: "Select a profile photo",
+        });
+      }
+
+      if (file.mimetype !== "image/webp") {
+        return res.status(400).json({
+          success: false,
+          message: "Profile photo must be processed as WebP before upload",
+        });
+      }
+
+      const member = await req.prisma.member.findFirst({
+        where: {
+          id: memberId,
+          organizationId: req.user!.organizationId,
+          deletedAt: null,
+        },
+        include: { profileMedia: true },
+      });
+
+      if (!member) {
+        return res.status(404).json({
+          success: false,
+          message: "Member not found",
+        });
+      }
+
+      const mediaId = crypto.randomUUID();
+      const filename = `profile-${mediaId}.webp`;
+      const imageDirectory = path.resolve("storage/images");
+      const imagePath = path.join(imageDirectory, filename);
+
+      await fs.mkdir(imageDirectory, { recursive: true });
+      await fs.writeFile(imagePath, file.buffer);
+
+      try {
+        const mediaAsset = await req.prisma.$transaction(async (tx) => {
+          const created = await tx.mediaAsset.create({
+            data: {
+              organizationId: req.user!.organizationId,
+              storageProvider: "local",
+              storageKey: `/media/images/${filename}`,
+              originalFilename: file.originalname,
+              mimeType: "image/webp",
+              fileSizeBytes: BigInt(file.size),
+              widthPx: 512,
+              heightPx: 512,
+              metadata: {
+                thumbnailUrl: `/media/images/${filename}`,
+                profilePhoto: true,
+              },
+            },
+          });
+
+          await tx.member.update({
+            where: { id: member.id },
+            data: { profileMediaId: created.id, customFields: withoutLegacyPhotoUrl(member.customFields) },
+          });
+
+          await tx.auditLog.create({
+            data: {
+              organizationId: req.user!.organizationId,
+              actorUserId: req.user!.userId,
+              action: "MEMBER_PROFILE_PHOTO_UPDATE",
+              entityType: "member",
+              entityId: member.id,
+              beforeData: {
+                profileMediaId: member.profileMediaId,
+              },
+              afterData: {
+                profileMediaId: created.id,
+              },
+              metadata: {
+                actorRoles: req.authorization?.roleNames ?? [],
+              },
+            },
+          });
+
+          return created;
+        });
+
+        if (member.profileMedia) {
+          const oldPath = storagePathFromKey(member.profileMedia.storageKey);
+          if (oldPath) {
+            try {
+              await fs.unlink(oldPath);
+            } catch {
+              // Database state is authoritative when the old file is already absent.
+            }
+          }
+
+          await req.prisma.mediaAsset.update({
+            where: { id: member.profileMedia.id },
+            data: { deletedAt: new Date() },
+          });
+        }
+
+        return res.status(201).json({
+          success: true,
+          data: mediaAsset,
+        });
+      } catch (error) {
+        try {
+          await fs.unlink(imagePath);
+        } catch {
+          // Nothing to clean up when the staged file is already absent.
+        }
+        throw error;
+      }
+    } catch (error) {
+      console.error("PROFILE_PHOTO_UPLOAD_ERROR:", error);
+      return res.status(400).json({
+        success: false,
+        message: error instanceof Error ? error.message : "Unable to upload profile photo",
+      });
+    }
+  },
+);
+
+router.delete(
+  "/members/:memberId/profile-photo",
+  requireAuth,
+  requirePermission(PERMISSIONS.membersWrite),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const memberId = normalizeParam(req.params.memberId);
+      const member = await req.prisma.member.findFirst({
+        where: {
+          id: memberId,
+          organizationId: req.user!.organizationId,
+          deletedAt: null,
+        },
+        include: { profileMedia: true },
+      });
+
+      if (!member) {
+        return res.status(404).json({ success: false, message: "Member not found" });
+      }
+
+      if (!member.profileMedia) {
+        return res.json({ success: true });
+      }
+
+      const profileMedia = member.profileMedia;
+      const storagePath = storagePathFromKey(profileMedia.storageKey);
+
+      await req.prisma.$transaction(async (tx) => {
+        await tx.member.update({
+          where: { id: member.id },
+          data: { profileMediaId: null, customFields: withoutLegacyPhotoUrl(member.customFields) },
+        });
+        await tx.mediaAsset.update({
+          where: { id: profileMedia.id },
+          data: { deletedAt: new Date() },
+        });
+        await tx.auditLog.create({
+          data: {
+            organizationId: req.user!.organizationId,
+            actorUserId: req.user!.userId,
+            action: "MEMBER_PROFILE_PHOTO_DELETE",
+            entityType: "member",
+            entityId: member.id,
+            beforeData: { profileMediaId: profileMedia.id },
+            afterData: { profileMediaId: null },
+            metadata: { actorRoles: req.authorization?.roleNames ?? [] },
+          },
+        });
+      });
+
+      if (storagePath) {
+        try {
+          await fs.unlink(storagePath);
+        } catch {
+          // Database state remains authoritative.
+        }
+      }
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("PROFILE_PHOTO_DELETE_ERROR:", error);
+      return res.status(400).json({
+        success: false,
+        message: error instanceof Error ? error.message : "Unable to remove profile photo",
+      });
+    }
+  },
+);
 
 router.post(
   "/albums/:albumId/photos",
