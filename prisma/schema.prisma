@@ -204,7 +204,7 @@ model Member {
   assignments   ManagementAssignment[]
 
   @@index([organizationId, lastName, firstName])
-  @@index([organizationId, memberCode])
+  @@unique([organizationId, memberCode])
 }
 
 model ManagementPosition {

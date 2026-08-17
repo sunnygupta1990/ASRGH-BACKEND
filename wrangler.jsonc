@@ -10,7 +10,8 @@
     "enabled": true
   },
   "vars": {
-    "JWT_EXPIRES_IN": "8h"
+    "JWT_EXPIRES_IN": "8h",
+    "PUBLIC_ORGANIZATION_CODE": "ASRGH"
   },
   "r2_buckets": [
     {

@@ -7,6 +7,10 @@ import authRouter from "./routes/auth";
 import adminRouter from "./routes/admin";
 import membersRouter from "./routes/members";
 import eventsRouter from "./routes/events";
+import adminPortalRouter from "./routes/adminPortal";
+import publicRouter from "./routes/public";
+import adminOperationsRouter from "./routes/adminOperations";
+import managementRouter from "./routes/management";
 import { AppPrisma } from "./config/prisma";
 
 export type PrismaProvider = () => AppPrisma;
@@ -49,7 +53,8 @@ export function createApp(
     }),
   );
 
-  app.use(express.json());
+  // Bulk import rows are revalidated server-side and capped by the import route.
+  app.use(express.json({ limit: "5mb" }));
 
   app.use((req, _res, next) => {
     (req as RequestWithPrisma).prisma = getPrisma();
@@ -66,8 +71,12 @@ export function createApp(
 
   app.use("/api/auth", authRouter);
   app.use("/api/admin", adminRouter);
+  app.use("/api/admin/portal", adminPortalRouter);
+  app.use("/api/admin/operations", adminOperationsRouter);
+  app.use("/api/admin/management", managementRouter);
   app.use("/api/members", membersRouter);
   app.use("/api/events", eventsRouter);
+  app.use("/api/public", publicRouter);
   app.use("/api", photosRouter);
 
   return app;

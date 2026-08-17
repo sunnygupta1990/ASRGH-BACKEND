@@ -10,10 +10,13 @@ import {
   AuthenticatedRequest,
   requireAuth,
 } from "../middleware/requireAuth";
+import { PERMISSIONS, requirePermission } from "../auth/permissions";
+import { recordAudit, requestAuditContext } from "../services/audit.service";
 import {
   deletePhoto,
   setPhotoAsCover,
   updatePhotoCaption,
+  reorderPhotos,
 } from "../services/photo.service";
 import { normalizeParam } from "../utils/routeParams";
 
@@ -50,6 +53,7 @@ function storagePathFromKey(storageKey: string): string | null {
 router.post(
   "/albums/:albumId/photos",
   requireAuth,
+  requirePermission(PERMISSIONS.photosWrite),
   upload.array("photos", 50),
   async (req: AuthenticatedRequest, res) => {
     try {
@@ -160,6 +164,7 @@ router.post(
         uploadedPhotos.push(albumPhoto);
       }
 
+      await recordAudit(req.prisma, requestAuditContext(req), { action: "PHOTO_UPLOAD", entityType: "event_album", entityId: album.id, metadata: { photoIds: uploadedPhotos.map((photo) => photo.id), count: uploadedPhotos.length } });
       return res.status(201).json({
         success: true,
         data: uploadedPhotos,
@@ -178,6 +183,7 @@ router.post(
 router.patch(
   "/albums/:albumId/photos/:photoId",
   requireAuth,
+  requirePermission(PERMISSIONS.photosWrite),
   async (req: AuthenticatedRequest, res) => {
     try {
       const albumId = normalizeParam(req.params.albumId);
@@ -191,6 +197,7 @@ router.patch(
         {
           prisma: req.prisma,
           organizationId: req.user!.organizationId,
+          audit: requestAuditContext(req),
         },
         albumId,
         photoId,
@@ -222,6 +229,7 @@ router.patch(
 router.patch(
   "/albums/:albumId/photos/:photoId/cover",
   requireAuth,
+  requirePermission(PERMISSIONS.photosWrite),
   async (req: AuthenticatedRequest, res) => {
     try {
       const albumId = normalizeParam(req.params.albumId);
@@ -231,6 +239,7 @@ router.patch(
         {
           prisma: req.prisma,
           organizationId: req.user!.organizationId,
+          audit: requestAuditContext(req),
         },
         albumId,
         photoId,
@@ -260,6 +269,7 @@ router.patch(
 router.delete(
   "/albums/:albumId/photos/:photoId",
   requireAuth,
+  requirePermission(PERMISSIONS.photosDelete),
   async (req: AuthenticatedRequest, res) => {
     try {
       const albumId = normalizeParam(req.params.albumId);
@@ -269,6 +279,7 @@ router.delete(
         {
           prisma: req.prisma,
           organizationId: req.user!.organizationId,
+          audit: requestAuditContext(req),
         },
         albumId,
         photoId,
@@ -313,3 +324,12 @@ router.delete(
 );
 
 export default router;
+router.put("/albums/:albumId/photos/order", requireAuth, requirePermission(PERMISSIONS.photosWrite), async (req, res) => {
+  try {
+    const photoIds = Array.isArray(req.body.photoIds) ? req.body.photoIds.filter((id: unknown): id is string => typeof id === "string") : [];
+    const result = await reorderPhotos({ prisma: req.prisma, organizationId: req.user!.organizationId, audit: requestAuditContext(req) }, String(req.params.albumId), photoIds);
+    return result ? res.json({ success: true }) : res.status(404).json({ success: false, message: "Album not found" });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error instanceof Error ? error.message : "Invalid photo order" });
+  }
+});

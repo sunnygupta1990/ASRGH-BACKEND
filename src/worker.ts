@@ -22,6 +22,7 @@ type R2LikeBucket = {
 type CloudflareEnv = {
   MEDIA_BUCKET: R2LikeBucket;
   DATABASE_URL: string;
+  PUBLIC_ORGANIZATION_CODE: string;
 };
 
 const workerEnv = env as unknown as CloudflareEnv;
@@ -29,6 +30,7 @@ const workerEnv = env as unknown as CloudflareEnv;
 const app = createApp(
   () => createRequestPrismaClient(workerEnv.DATABASE_URL),
   photosRouter,
+  workerEnv.PUBLIC_ORGANIZATION_CODE,
 );
 
 app.get("/media/*path", async (req, res) => {

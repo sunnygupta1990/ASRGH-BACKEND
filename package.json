@@ -8,6 +8,7 @@
     "dev:worker": "wrangler dev",
     "start": "node dist/server.js",
     "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.js",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types"
   },

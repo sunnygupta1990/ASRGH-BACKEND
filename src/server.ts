@@ -20,7 +20,6 @@ app.listen(PORT, () => {
   console.log(`ASRGH API running on http://localhost:${PORT}`);
 });
 
-
 const shutdown = async () => {
   await disconnectPrisma();
 };

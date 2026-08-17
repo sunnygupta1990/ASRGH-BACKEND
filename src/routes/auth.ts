@@ -24,6 +24,7 @@ router.post("/login", async (req, res) => {
         status: "active",
         deletedAt: null,
       },
+      include: { roles: { include: { role: { include: { permissions: { include: { permission: true } } } } } } },
     });
 
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
@@ -49,6 +50,10 @@ router.post("/login", async (req, res) => {
       data: { lastLoginAt: new Date() },
     });
 
+    const activeRoles = user.roles
+      .map(({ role }) => role)
+      .filter((role) => role.isActive && role.organizationId === user.organizationId);
+
     return res.json({
       success: true,
       token,
@@ -56,6 +61,11 @@ router.post("/login", async (req, res) => {
         id: user.id,
         email: user.email,
         displayName: user.displayName,
+        roleId: activeRoles[0]?.id ?? null,
+        roleName: activeRoles[0]?.name ?? "No active role",
+        roles: activeRoles.map((role) => ({ id: role.id, name: role.name, isSystemRole: role.isSystemRole })),
+        permissions: [...new Set(activeRoles.flatMap((role) => role.permissions.map(({ permission }) => permission.code)))],
+        isSystemRole: activeRoles.some((role) => role.isSystemRole),
       },
     });
   } catch {

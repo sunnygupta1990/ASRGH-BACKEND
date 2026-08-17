@@ -12,13 +12,19 @@ declare global {
         userId: string;
         organizationId: string;
       };
+      authorization?: {
+        isSystemRole: boolean;
+        roleIds: string[];
+        roleNames: string[];
+        permissions: Set<string>;
+      };
     }
   }
 }
 
 export type AuthenticatedRequest = Request;
 
-export function requireAuth(
+export async function requireAuth(
   req: Request,
   res: Response,
   next: NextFunction,
@@ -43,7 +49,47 @@ export function requireAuth(
       organizationId: string;
     };
 
+    const user = await req.prisma.adminUser.findFirst({
+      where: {
+        id: payload.userId,
+        organizationId: payload.organizationId,
+        status: "active",
+        deletedAt: null,
+      },
+      include: {
+        roles: {
+          include: {
+            role: {
+              include: {
+                permissions: { include: { permission: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired session",
+      });
+    }
+
     req.user = payload;
+    const activeRoles = user.roles
+      .map((assignment) => assignment.role)
+      .filter((role) => role.isActive && role.organizationId === payload.organizationId);
+    req.authorization = {
+      isSystemRole: activeRoles.some((role) => role.isSystemRole),
+      roleIds: activeRoles.map((role) => role.id),
+      roleNames: activeRoles.map((role) => role.name),
+      permissions: new Set(
+        activeRoles.flatMap((role) =>
+          role.permissions.map((relation) => relation.permission.code),
+        ),
+      ),
+    };
     next();
   } catch {
     return res.status(401).json({
