@@ -35,6 +35,7 @@ router.get(
       success: true,
       user: {
         id: user.id,
+        employeeId: user.employeeId,
         email: user.email,
         displayName: user.displayName,
         status: user.status,

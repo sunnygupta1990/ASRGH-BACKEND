@@ -132,14 +132,25 @@ model RolePermission {
 }
 
 model AdminUser {
-  id             String    @id @default(uuid()) @db.Uuid
-  organizationId String    @db.Uuid
-  email          String    @db.VarChar(255)
-  passwordHash   String
-  displayName    String    @db.VarChar(200)
-  phone          String?   @db.VarChar(50)
-  status         String    @default("active") @db.VarChar(30)
-  lastLoginAt    DateTime? @db.Timestamptz(6)
+  id                  String    @id @default(uuid()) @db.Uuid
+  organizationId      String    @db.Uuid
+  employeeId          String?   @db.VarChar(80)
+  email               String    @db.VarChar(255)
+  passwordHash        String
+  displayName         String    @db.VarChar(200)
+  dateOfBirth         DateTime? @db.Date
+  phone               String?   @db.VarChar(50)
+  addressLine1        String?   @db.VarChar(250)
+  addressLine2        String?   @db.VarChar(250)
+  city                String?   @db.VarChar(100)
+  state               String?   @db.VarChar(100)
+  country             String?   @db.VarChar(100)
+  designation         String?   @db.VarChar(150)
+  status              String    @default("active") @db.VarChar(30)
+  failedLoginAttempts Int       @default(0)
+  lastFailedLoginAt   DateTime? @db.Timestamptz(6)
+  blockedAt           DateTime? @db.Timestamptz(6)
+  lastLoginAt         DateTime? @db.Timestamptz(6)
   metadata       Json      @default("{}")
   customFields   Json      @default("{}")
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
@@ -158,6 +169,7 @@ model AdminUser {
   backups         SystemBackup[]
 
   @@unique([organizationId, email])
+  @@unique([organizationId, employeeId])
   @@index([organizationId])
 }
 

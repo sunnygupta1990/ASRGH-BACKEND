@@ -11,6 +11,7 @@ import adminPortalRouter from "./routes/adminPortal";
 import publicRouter from "./routes/public";
 import adminOperationsRouter from "./routes/adminOperations";
 import managementRouter from "./routes/management";
+import staffRouter from "./routes/staff";
 import { AppPrisma } from "./config/prisma";
 
 export type PrismaProvider = () => AppPrisma;
@@ -74,6 +75,7 @@ export function createApp(
   app.use("/api/admin/portal", adminPortalRouter);
   app.use("/api/admin/operations", adminOperationsRouter);
   app.use("/api/admin/management", managementRouter);
+  app.use("/api/admin/staff", staffRouter);
   app.use("/api/members", membersRouter);
   app.use("/api/events", eventsRouter);
   app.use("/api/public", publicRouter);

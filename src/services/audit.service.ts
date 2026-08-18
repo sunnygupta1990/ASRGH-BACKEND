@@ -92,7 +92,8 @@ export async function withAudit<T>(
   context: AuditContext,
   operation: (tx: TransactionClient) => Promise<{ result: T; event: AuditEvent }>,
 ): Promise<T> {
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(
+  async (tx) => {
     const { result, event } = await operation(tx);
 
     await tx.auditLog.create({
@@ -115,7 +116,11 @@ export async function withAudit<T>(
     });
 
     return result;
-  });
+    },
+  {
+    timeout: 15000,
+  },
+);
 }
 
 export async function recordAudit(prisma: AppPrisma, context: AuditContext, event: AuditEvent) {
