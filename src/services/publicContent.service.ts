@@ -63,6 +63,104 @@ function getString(
   return typeof record[key] === "string" ? record[key] : undefined;
 }
 
+function isAssignmentCurrent(
+  assignment: {
+    startDate: Date | null;
+    endDate: Date | null;
+    term: {
+      startDate: Date;
+      endDate: Date | null;
+    };
+  },
+  now: Date,
+): boolean {
+  const today = now.toISOString().slice(0, 10);
+  const termStart = assignment.term.startDate.toISOString().slice(0, 10);
+  const termEnd = assignment.term.endDate?.toISOString().slice(0, 10);
+  const assignmentStart = assignment.startDate?.toISOString().slice(0, 10);
+  const assignmentEnd = assignment.endDate?.toISOString().slice(0, 10);
+
+  if (termStart > today) {
+    return false;
+  }
+
+  if (termEnd && termEnd < today) {
+    return false;
+  }
+
+  if (assignmentStart && assignmentStart > today) {
+    return false;
+  }
+
+  if (assignmentEnd && assignmentEnd < today) {
+    return false;
+  }
+
+  return true;
+}
+
+function formatManagementAssignment(
+  assignment: {
+    id: string;
+    memberId: string;
+    positionId: string;
+    termId: string;
+    startDate: Date | null;
+    endDate: Date | null;
+    displayOrder: number;
+    notes: string | null;
+    position: {
+      id: string;
+      code: string;
+      name: string;
+      displayOrder: number;
+      description: string | null;
+      isActive: boolean;
+      customFields: unknown;
+    };
+    term: {
+      id: string;
+      name: string;
+      startDate: Date;
+      endDate: Date | null;
+      status: string;
+      notes: string | null;
+      customFields: unknown;
+    };
+  },
+  current: boolean,
+) {
+  return {
+    id: assignment.id,
+    memberId: assignment.memberId,
+    positionId: assignment.positionId,
+    termId: assignment.termId,
+    startDate: assignment.startDate,
+    endDate: assignment.endDate,
+    displayOrder: assignment.displayOrder,
+    notes: assignment.notes,
+    current,
+    position: {
+      id: assignment.position.id,
+      code: assignment.position.code,
+      name: assignment.position.name,
+      displayOrder: assignment.position.displayOrder,
+      description: assignment.position.description,
+      isActive: assignment.position.isActive,
+      customFields: assignment.position.customFields,
+    },
+    term: {
+      id: assignment.term.id,
+      name: assignment.term.name,
+      startDate: assignment.term.startDate,
+      endDate: assignment.term.endDate,
+      status: assignment.term.status,
+      notes: assignment.term.notes,
+      customFields: assignment.term.customFields,
+    },
+  };
+}
+
 export async function resolvePublicOrganization(
   prisma: AppPrisma,
   origin?: string,
@@ -94,8 +192,7 @@ export async function resolvePublicOrganization(
   if (requestHostname) {
     const matched = organizations.find(
       (organization) =>
-        normalizeHostname(organization.websiteUrl) ===
-        requestHostname,
+        normalizeHostname(organization.websiteUrl) === requestHostname,
     );
 
     if (matched) {
@@ -174,6 +271,7 @@ export async function getPublicEvents(
 
   return events.map((event) => {
     const fields = asRecord(event.customFields);
+
     const album =
       event.album && event.album.deletedAt === null
         ? {
@@ -278,9 +376,53 @@ export async function getPublicMembers(
         },
       },
       customFields: true,
+      assignments: {
+        orderBy: [
+          {
+            displayOrder: "asc",
+          },
+          {
+            createdAt: "asc",
+          },
+        ],
+        select: {
+          id: true,
+          memberId: true,
+          positionId: true,
+          termId: true,
+          startDate: true,
+          endDate: true,
+          displayOrder: true,
+          notes: true,
+          position: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              displayOrder: true,
+              description: true,
+              isActive: true,
+              customFields: true,
+            },
+          },
+          term: {
+            select: {
+              id: true,
+              name: true,
+              startDate: true,
+              endDate: true,
+              status: true,
+              notes: true,
+              customFields: true,
+            },
+          },
+        },
+      },
     },
     orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
   });
+
+  const now = new Date();
 
   return members.map((member) => {
     const fields = asRecord(member.customFields);
@@ -315,11 +457,48 @@ export async function getPublicMembers(
     };
 
     const photoUrl = getString(fields, "photo_url");
+
     const profilePhotoUrl =
       member.profileMedia?.isPublic &&
       member.profileMedia.deletedAt === null
         ? member.profileMedia.storageKey
         : undefined;
+
+    const assignments = member.assignments.map((assignment) =>
+      formatManagementAssignment(
+        assignment,
+        isAssignmentCurrent(assignment, now),
+      ),
+    );
+
+    const currentAssignments = assignments.filter(
+      (assignment) => assignment.current,
+    );
+
+    const legacyManagement =
+      currentAssignments.length === 0 &&
+      member.assignments.length === 0 &&
+      getBoolean(fields, "current_management", false);
+
+    const currentManagementPost =
+      currentAssignments.length > 0
+        ? currentAssignments
+            .sort(
+              (a, b) =>
+                a.position.displayOrder - b.position.displayOrder,
+            )
+            .map((assignment) => assignment.position.name)
+            .join(", ")
+        : getString(fields, "management_post");
+
+    const currentDisplayOrder =
+      currentAssignments.length > 0
+        ? Math.min(
+            ...currentAssignments.map(
+              (assignment) => assignment.displayOrder,
+            ),
+          )
+        : getNumber(fields, "display_order", 0);
 
     return {
       id: member.id,
@@ -342,6 +521,7 @@ export async function getPublicMembers(
       notes: visibility.designation_public
         ? member.notes
         : null,
+      assignments,
       customFields: {
         category: getString(fields, "category") ?? "General",
         designation: visibility.designation_public
@@ -350,13 +530,10 @@ export async function getPublicMembers(
         photo_url: visibility.photo_public
           ? profilePhotoUrl ?? photoUrl
           : undefined,
-        current_management: getBoolean(
-          fields,
-          "current_management",
-          false,
-        ),
-        management_post: getString(fields, "management_post"),
-        display_order: getNumber(fields, "display_order", 0),
+        current_management:
+          currentAssignments.length > 0 || legacyManagement,
+        management_post: currentManagementPost,
+        display_order: currentDisplayOrder,
         visibility,
         bio: getString(fields, "bio"),
       },
