@@ -10,7 +10,8 @@
     "build": "tsc",
     "test": "npm run build && node --test tests/*.test.js",
     "deploy": "wrangler deploy",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "data:classify-members": "tsx src/scripts/classifyMembers.ts"
   },
   "license": "ISC",
   "type": "commonjs",

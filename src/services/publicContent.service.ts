@@ -1,6 +1,7 @@
 // backened/src/services/publicContent.service.ts
 
 import { AppPrisma } from "../config/prisma";
+import { categoryFromMemberCode, compareMemberCodes } from "./memberClassification.service";
 
 export class PublicOrganizationResolutionError extends Error {
   readonly status: 404 | 409;
@@ -61,6 +62,18 @@ function getString(
   key: string,
 ): string | undefined {
   return typeof record[key] === "string" ? record[key] : undefined;
+}
+
+export function publicAddressFields(
+  addressPublic: boolean,
+  member: { addressLine2: string | null; city: string | null },
+) {
+  return {
+    addressLine1: null,
+    addressLine2: addressPublic ? member.addressLine2 : null,
+    city: addressPublic ? member.city : null,
+    state: null,
+  };
 }
 
 function isAssignmentCurrent(
@@ -500,6 +513,8 @@ export async function getPublicMembers(
           )
         : getNumber(fields, "display_order", 0);
 
+    const category = categoryFromMemberCode(member.memberCode);
+    const publicAddress = publicAddressFields(visibility.address_public, member);
     return {
       id: member.id,
       memberCode: member.memberCode,
@@ -508,14 +523,7 @@ export async function getPublicMembers(
       displayName: member.displayName,
       phone: visibility.phone_public ? member.phone : null,
       email: visibility.email_public ? member.email : null,
-      addressLine1: visibility.address_public
-        ? member.addressLine1
-        : null,
-      addressLine2: visibility.address_public
-        ? member.addressLine2
-        : null,
-      city: visibility.address_public ? member.city : null,
-      state: visibility.address_public ? member.state : null,
+      ...publicAddress,
       membershipStatus: member.membershipStatus,
       joinedOn: member.joinedOn,
       notes: visibility.designation_public
@@ -523,9 +531,9 @@ export async function getPublicMembers(
         : null,
       assignments,
       customFields: {
-        category: getString(fields, "category") ?? "General",
+        category,
         designation: visibility.designation_public
-          ? getString(fields, "designation")
+          ? category
           : undefined,
         photo_url: visibility.photo_public
           ? profilePhotoUrl ?? photoUrl
@@ -538,7 +546,7 @@ export async function getPublicMembers(
         bio: getString(fields, "bio"),
       },
     };
-  });
+  }).sort((left, right) => compareMemberCodes(left.memberCode, right.memberCode));
 }
 
 export async function getPublicAnnouncements(

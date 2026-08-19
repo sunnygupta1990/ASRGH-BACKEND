@@ -9,6 +9,7 @@ import {
 } from "../middleware/requireAuth";
 import { PERMISSIONS, requirePermission } from "../auth/permissions";
 import { requestAuditContext, withAudit } from "../services/audit.service";
+import { classifiedCustomFields } from "../services/memberClassification.service";
 
 const router = Router();
 const memberEmailSchema = z.string().email().or(z.literal(""));
@@ -132,7 +133,7 @@ router.post("/", requireAuth, requirePermission(PERMISSIONS.membersWrite), async
         notes: data.notes || null,
         profileMediaId: data.profileMediaId ?? null,
         metadata: toPrismaCustomFields(data.metadata),
-        customFields: toPrismaCustomFields(data.customFields),
+        customFields: toPrismaCustomFields(classifiedCustomFields(data.memberCode, data.customFields)),
       },
       include: { profileMedia: true, assignments: { include: { position: true, term: true } } },
       });
@@ -213,7 +214,8 @@ router.put("/:id", requireAuth, requirePermission(PERMISSIONS.membersWrite), asy
 
     const mergedCustomFields = data.customFields
       ? { ...existingCustomFields, ...data.customFields }
-      : undefined;
+      : existingCustomFields;
+    const finalMemberCode = data.memberCode ?? existing.memberCode;
 
     const member = await withAudit(req.prisma, requestAuditContext(req), async (tx) => {
       const result = await tx.member.update({
@@ -241,7 +243,7 @@ router.put("/:id", requireAuth, requirePermission(PERMISSIONS.membersWrite), asy
         notes: data.notes,
         profileMediaId: data.profileMediaId,
         metadata: toPrismaCustomFields(data.metadata),
-        customFields: toPrismaCustomFields(mergedCustomFields),
+        customFields: toPrismaCustomFields(classifiedCustomFields(finalMemberCode, mergedCustomFields)),
       },
       include: { profileMedia: true, assignments: { include: { position: true, term: true } } },
       });

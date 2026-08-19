@@ -5,7 +5,9 @@ const { commitImport, createExportWorkbook, IMPORT_BATCH_SIZE, validateImportRow
 
 function validationPrisma(existingCodes = [], categories = []) {
   return {
-    member: { findMany: async () => existingCodes.map((memberCode) => ({ memberCode })) },
+    member: { findMany: async () => existingCodes.map((entry, index) => typeof entry === 'string'
+      ? { id: `existing-${index}`, memberCode: entry, membershipStatus: 'active', deletedAt: null, metadata: {}, customFields: {} }
+      : entry) },
     event: { findMany: async () => [] },
     socialWorkItem: { findMany: async () => [] },
     announcement: { findMany: async () => [] },
@@ -13,10 +15,11 @@ function validationPrisma(existingCodes = [], categories = []) {
   };
 }
 
-test('member import rejects duplicates, impossible dates, and malformed JSON', async () => {
+test('existing active member codes become updates while invalid rows are rejected', async () => {
   const prisma = validationPrisma(['MEM-1']);
-  const duplicate = await validateImportRows(prisma, 'org-1', 'members', [{ 'Member Code': 'mem-1', 'First Name': 'A' }]);
-  assert.equal(duplicate.rejected.length, 1);
+  const update = await validateImportRows(prisma, 'org-1', 'members', [{ 'Member Code': 'mem-1', 'First Name': 'A' }]);
+  assert.equal(update.rejected.length, 0);
+  assert.equal(update.accepted[0].operation, 'update');
   const invalid = await validateImportRows(prisma, 'org-1', 'members', [{ 'Member Code': 'MEM-2', 'First Name': 'A', 'Date of Birth': '2026-02-30' }, { 'Member Code': 'MEM-3', 'First Name': 'B', 'Custom Fields JSON': '{bad' }]);
   assert.deepEqual(invalid.rejected.map((row) => row.rowNumber), [2, 3]);
 });
@@ -39,14 +42,16 @@ test('member workbook contains relational sheets and complete scalar business fi
   const row = XLSX.utils.sheet_to_json(workbook.Sheets.Members)[0];
   assert.equal(row['Member Code'], 'M1');
   assert.equal(row['Metadata JSON'], '{"source":"test"}');
-  assert.equal(row['Custom Fields JSON'], '{"category":"General"}');
+  assert.equal(row['Member Category'], 'Ordinary');
+  assert.equal(row.Designation, 'Ordinary');
   assert.equal(Object.hasOwn(row, 'passwordHash'), false);
 });
 
-function memberImportPrisma(failingCode) {
+function memberImportPrisma(failingCode, existingMembers = []) {
   const transactionMemberCounts = [];
   let currentMemberCount = 0;
   let nextId = 0;
+  const updates = [];
   const importBatch = {
     create: async ({ data }) => ({ id: 'batch-1', ...data }),
     update: async ({ data }) => ({ id: 'batch-1', ...data }),
@@ -56,14 +61,14 @@ function memberImportPrisma(failingCode) {
       currentMemberCount += 1;
       if (data.memberCode === failingCode) throw new Error(`Database rejected ${failingCode}`);
       return { id: `member-${++nextId}` };
-    } },
+    }, update: async ({ where, data }) => { updates.push({ where, data }); return { id: where.id, ...data }; } },
     importRecord: { create: async () => ({ id: `record-${nextId}` }) },
     rejectedRecord: { create: async () => ({}) },
     importBatch,
     auditLog: { create: async () => ({}) },
   };
   const prisma = {
-    member: { findMany: async () => [] },
+    member: { findMany: async () => existingMembers },
     importBatch,
     $transaction: async (callback) => {
       currentMemberCount = 0;
@@ -72,7 +77,7 @@ function memberImportPrisma(failingCode) {
       return result;
     },
   };
-  return { prisma, transactionMemberCounts };
+  return { prisma, transactionMemberCounts, updates };
 }
 
 function memberRows(count) {
@@ -105,4 +110,80 @@ test('a persistence failure after the first 50 is reported without undoing earli
   assert.equal(result.rejected, 1);
   assert.equal(transactionMemberCounts[0], 50);
   assert.ok(transactionMemberCounts.some((count) => count > 1), 'failed batch was subdivided rather than making every normal record its own transaction');
+});
+
+test('new member code creates a member and reports created', async () => {
+  const { prisma } = memberImportPrisma();
+  const result = await commitImport(prisma, { organizationId: 'org-1', actorUserId: 'user-1', actorRoleNames: ['Admin'] }, 'members', 'members.xlsx', [{ 'Member Code': 'NEW-1', 'First Name': 'New' }]);
+  assert.deepEqual({ created: result.created, updated: result.updated, skipped: result.skipped, rejected: result.rejected }, { created: 1, updated: 0, skipped: 0, rejected: 0 });
+});
+
+test('existing active member updates only meaningful supplied fields', async () => {
+  const existing = { id: 'member-existing', memberCode: 'L-071', membershipStatus: 'active', deletedAt: null, metadata: { source: 'old' }, customFields: { category: 'General', designation: 'Member' } };
+  const planned = await validateImportRows(validationPrisma([existing]), 'org-1', 'members', [{
+    'Member Code': 'L-071', 'First Name': 'Rahul Sharma', Phone: '', 'Address Line 1': 'Mumbai', City: '', Designation: 'Chairperson',
+  }]);
+  assert.equal(planned.accepted[0].operation, 'update');
+  assert.equal(planned.accepted[0].data.firstName, 'Rahul Sharma');
+  assert.equal(planned.accepted[0].data.addressLine1, 'Mumbai');
+  assert.equal(planned.accepted[0].data.phone, undefined);
+  assert.equal(planned.accepted[0].data.city, undefined);
+  assert.equal(planned.accepted[0].data.memberCode, undefined);
+  assert.equal(planned.accepted[0].data.customFields.designation, 'Life Member');
+  assert.equal(planned.accepted[0].data.customFields.category, 'Life Member');
+});
+
+test('commit reports updated separately and preserves blank database fields', async () => {
+  const existing = { id: 'member-existing', memberCode: 'L-071', membershipStatus: 'active', deletedAt: null, metadata: {}, customFields: {} };
+  const { prisma, updates } = memberImportPrisma(undefined, [existing]);
+  const result = await commitImport(prisma, { organizationId: 'org-1', actorUserId: 'user-1', actorRoleNames: ['Admin'] }, 'members', 'members.xlsx', [{ 'Member Code': 'L-071', 'First Name': 'Rahul Sharma', Phone: '', 'Address Line 1': 'Mumbai' }]);
+  assert.deepEqual({ created: result.created, updated: result.updated, skipped: result.skipped, rejected: result.rejected }, { created: 0, updated: 1, skipped: 0, rejected: 0 });
+  assert.equal(updates[0].where.id, 'member-existing');
+  assert.equal(updates[0].data.firstName, 'Rahul Sharma');
+  assert.equal(updates[0].data.addressLine1, 'Mumbai');
+  assert.equal(Object.hasOwn(updates[0].data, 'phone'), false);
+  assert.equal(Object.hasOwn(updates[0].data, 'memberCode'), false);
+});
+
+test('existing active member with all optional fields blank only applies authoritative classification', async () => {
+  const existing = { id: 'member-existing', memberCode: 'L-071', membershipStatus: 'active', deletedAt: null, metadata: { source: 'old' }, customFields: { category: 'General' } };
+  const planned = await validateImportRows(validationPrisma([existing]), 'org-1', 'members', [{ 'Member Code': 'L-071' }]);
+  assert.deepEqual(planned.accepted[0].data, { customFields: { category: 'Life Member', designation: 'Life Member' } });
+});
+
+test('inactive or deleted member is skipped and is not recreated', async () => {
+  for (const existing of [
+    { id: 'inactive', memberCode: 'OLD-1', membershipStatus: 'archived', deletedAt: null, metadata: {}, customFields: {} },
+    { id: 'deleted', memberCode: 'OLD-2', membershipStatus: 'active', deletedAt: new Date(), metadata: {}, customFields: {} },
+  ]) {
+    const planned = await validateImportRows(validationPrisma([existing]), 'org-1', 'members', [{ 'Member Code': existing.memberCode, 'First Name': 'Replacement' }]);
+    assert.equal(planned.accepted.length, 0);
+    assert.equal(planned.skipped.length, 1);
+    assert.match(planned.skipped[0].reason, /inactive\/deleted/);
+  }
+});
+
+test('duplicate member code within one file rejects the later row deterministically', async () => {
+  const planned = await validateImportRows(validationPrisma(), 'org-1', 'members', [
+    { 'Member Code': 'DUP-1', 'First Name': 'First' },
+    { 'Member Code': 'dup-1', 'First Name': 'Second' },
+  ]);
+  assert.equal(planned.accepted.length, 1);
+  assert.equal(planned.rejected.length, 1);
+  assert.equal(planned.rejected[0].rowNumber, 3);
+  assert.match(planned.rejected[0].error, /duplicated within this import file/);
+});
+
+test('Excel category and designation are always derived from Member Code', async () => {
+  for (const [code, expected] of [['T-123', 'Trustee'], ['t-124', 'Trustee'], ['L-123', 'Life Member'], ['l-124', 'Life Member'], ['O-1', 'Ordinary'], ['ABC-1', 'Ordinary']]) {
+    for (const supplied of [
+      { 'Member Category': expected, Designation: expected },
+      { 'Member Category': 'Wrong Category', Designation: 'President' },
+      { 'Member Category': '', Designation: '' },
+    ]) {
+      const result = await validateImportRows(validationPrisma(), 'org-1', 'members', [{ 'Member Code': code, 'First Name': 'Test', ...supplied }]);
+      assert.equal(result.accepted[0].data.customFields.category, expected);
+      assert.equal(result.accepted[0].data.customFields.designation, expected);
+    }
+  }
 });

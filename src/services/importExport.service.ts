@@ -2,11 +2,14 @@ import { Prisma } from "@prisma/client";
 import { AppPrisma } from "../config/prisma";
 import { AuditContext } from "./audit.service";
 import * as XLSX from "xlsx";
+import { categoryFromMemberCode, classifiedCustomFields } from "./memberClassification.service";
 
 type Row = Record<string, string>;
 type EntityType = "members" | "events" | "social_work" | "announcements";
-type Validated = { rowNumber: number; key: string; source: Row; data: Record<string, unknown> };
+type MemberOperation = "create" | "update";
+type Validated = { rowNumber: number; key: string; source: Row; data: Record<string, unknown>; operation?: MemberOperation; targetEntityId?: string };
 type Rejected = { rowNumber: number; key: string; source: Row; error: string; rejectionCode?: "VALIDATION_ERROR" | "PERSISTENCE_ERROR" };
+type Skipped = { rowNumber: number; key: string; source: Row; reason: string };
 export const IMPORT_BATCH_SIZE = 50;
 export class ImportCommitError extends Error {
   constructor(
@@ -48,21 +51,37 @@ async function existingKeys(prisma: AppPrisma, organizationId: string, type: Ent
 }
 
 export async function validateImportRows(prisma: AppPrisma, organizationId: string, type: EntityType, rows: Row[]) {
-  const used = await existingKeys(prisma, organizationId, type);
+  const used = type === "members" ? new Set<string>() : await existingKeys(prisma, organizationId, type);
+  const existingMembers = type === "members"
+    ? await prisma.member.findMany({
+        where: { organizationId },
+        select: { id: true, memberCode: true, membershipStatus: true, deletedAt: true, metadata: true, customFields: true },
+      })
+    : [];
+  const membersByCode = new Map(existingMembers.flatMap((member) => member.memberCode
+    ? [[member.memberCode.toLowerCase(), member] as const]
+    : []));
   const socialWorkCategories = type === "social_work" ? new Set((await prisma.socialWorkCategory.findMany({ where: { organizationId, isActive: true }, select: { name: true } })).map((category) => category.name.toLowerCase())) : new Set<string>();
   const accepted: Validated[] = [];
   const rejected: Rejected[] = [];
+  const skipped: Skipped[] = [];
   rows.forEach((source, index) => {
     const rowNumber = index + 2;
     const keyField = type === "members" ? "Member Code" : type === "events" ? "Event Code" : type === "social_work" ? "Activity Code" : "Announcement Code";
     const key = value(source, keyField);
     const reject = (error: string) => rejected.push({ rowNumber, key: key || `Row-${rowNumber}`, source, error });
     if (!key) return reject(`${keyField} is required`);
-    if (used.has(key.toLowerCase())) return reject(`${keyField} must be unique`);
+    if (used.has(key.toLowerCase())) return reject(`${keyField} is duplicated within this import file`);
 
     if (type === "members") {
+      const existing = membersByCode.get(key.toLowerCase());
+      if (existing && (existing.deletedAt || existing.membershipStatus !== "active")) {
+        skipped.push({ rowNumber, key, source, reason: "Member exists but is inactive/deleted." });
+        used.add(key.toLowerCase());
+        return;
+      }
       const firstName = value(source, "First Name");
-      if (!firstName) return reject("First Name is required");
+      if (!existing && !firstName) return reject("First Name is required");
 
       const managementRequested =
         yes(source["Current Management"]) ||
@@ -83,8 +102,9 @@ export async function validateImportRows(prisma: AppPrisma, organizationId: stri
         return reject("Gender must be Male, Female, or Prefer not to say");
       }
 
-      const memberStatus = firstValue(source, "Status", "Membership Status").toLowerCase() || "active";
-      if (!["active", "archived"].includes(memberStatus)) {
+      const memberStatusInput = firstValue(source, "Status", "Membership Status");
+      const memberStatus = memberStatusInput.toLowerCase() || "active";
+      if (memberStatusInput && !["active", "archived"].includes(memberStatus)) {
         return reject("Status must be Active or Archived");
       }
 
@@ -97,17 +117,17 @@ export async function validateImportRows(prisma: AppPrisma, organizationId: stri
         return reject("Joined Date must be YYYY-MM-DD");
       }
 
-      const customFields: Record<string, unknown> = {
-        category: firstValue(source, "Member Category", "Category") || "General",
-        designation: value(source, "Designation") || "Member",
-        visibility: {
+      const customFields: Record<string, unknown> = existing
+        ? { ...((existing.customFields as Record<string, unknown>) ?? {}) }
+        : {
+          visibility: {
           phone_public: false,
           email_public: false,
           address_public: false,
           photo_public: true,
           designation_public: true,
-        },
-      };
+          },
+        };
 
       const customFieldsText = value(source, "Custom Fields JSON");
       if (customFieldsText) {
@@ -121,15 +141,30 @@ export async function validateImportRows(prisma: AppPrisma, organizationId: stri
           return reject("Custom Fields JSON is invalid");
         }
       }
+      Object.assign(customFields, classifiedCustomFields(key, customFields));
 
-      let metadata: Record<string, unknown> = {};
+      let metadata: Record<string, unknown> = existing
+        ? { ...((existing.metadata as Record<string, unknown>) ?? {}) }
+        : {};
       try {
         metadata = jsonObject(value(source, "Metadata JSON"), "Metadata JSON");
       } catch (error) {
         return reject((error as Error).message);
       }
 
-      accepted.push({ rowNumber, key, source, data: { memberCode: key, firstName, middleName: value(source, "Middle Name") || null, lastName: value(source, "Last Name") || null, displayName: value(source, "Display Name") || null, gender: gender || null, dateOfBirth: dateOfBirth ? new Date(`${dateOfBirth}T00:00:00Z`) : null, phone: value(source, "Phone") || null, email: email || null, addressLine1: value(source, "Address Line 1") || null, addressLine2: value(source, "Address Line 2") || null, city: value(source, "City") || null, state: value(source, "State") || null, postalCode: value(source, "Postal Code") || null, country: value(source, "Country") || "India", membershipStatus: memberStatus, joinedOn: joinedOn ? new Date(`${joinedOn}T00:00:00Z`) : null, notes: value(source, "Notes") || null, metadata, customFields } });
+      const fields: Array<[string, string]> = [["firstName", "First Name"], ["middleName", "Middle Name"], ["lastName", "Last Name"], ["displayName", "Display Name"], ["gender", "Gender"], ["phone", "Phone"], ["email", "Email"], ["addressLine1", "Address Line 1"], ["addressLine2", "Address Line 2"], ["city", "City"], ["state", "State"], ["postalCode", "Postal Code"], ["country", "Country"], ["notes", "Notes"]];
+      const data: Record<string, unknown> = existing ? {} : { memberCode: key };
+      for (const [field, column] of fields) {
+        const supplied = value(source, column);
+        if (supplied) data[field] = supplied;
+        else if (!existing) data[field] = field === "country" ? "India" : null;
+      }
+      if (dateOfBirth) data.dateOfBirth = new Date(`${dateOfBirth}T00:00:00Z`); else if (!existing) data.dateOfBirth = null;
+      if (joinedOn) data.joinedOn = new Date(`${joinedOn}T00:00:00Z`); else if (!existing) data.joinedOn = null;
+      if (memberStatusInput || !existing) data.membershipStatus = memberStatus;
+      data.customFields = customFields;
+      if (value(source, "Metadata JSON") || !existing) data.metadata = metadata;
+      accepted.push({ rowNumber, key, source, data, operation: existing ? "update" : "create", targetEntityId: existing?.id });
     } else if (type === "events") {
       const title = value(source, "Event Title"); const date = value(source, "Event Date");
       if (!title) return reject("Event Title is required");
@@ -162,13 +197,13 @@ export async function validateImportRows(prisma: AppPrisma, organizationId: stri
     }
     used.add(key.toLowerCase());
   });
-  return { accepted, rejected };
+  return { accepted, rejected, skipped };
 }
 
 export async function commitImport(prisma: AppPrisma, audit: AuditContext, entityType: EntityType, filename: string, rows: Row[]) {
-  const { accepted, rejected } = await validateImportRows(prisma, audit.organizationId, entityType, rows);
+  const { accepted, rejected, skipped } = await validateImportRows(prisma, audit.organizationId, entityType, rows);
   if (entityType === "members") {
-    return commitMemberImport(prisma, audit, filename, rows, accepted, rejected);
+    return commitMemberImport(prisma, audit, filename, rows, accepted, rejected, skipped);
   }
   try {
     return await prisma.$transaction(async (tx) => {
@@ -229,7 +264,7 @@ export async function commitImport(prisma: AppPrisma, audit: AuditContext, entit
   }
 }
 
-async function commitMemberImport(prisma: AppPrisma, audit: AuditContext, filename: string, rows: Row[], accepted: Validated[], rejected: Rejected[]) {
+async function commitMemberImport(prisma: AppPrisma, audit: AuditContext, filename: string, rows: Row[], accepted: Validated[], rejected: Rejected[], skipped: Skipped[]) {
   const batch = await prisma.importBatch.create({
     data: {
       organizationId: audit.organizationId,
@@ -246,23 +281,29 @@ async function commitMemberImport(prisma: AppPrisma, audit: AuditContext, filena
     },
   });
   const createdIds: string[] = [];
+  const updatedIds: string[] = [];
   const persistenceRejected: Rejected[] = [];
 
-  const commitItems = async (items: Validated[]): Promise<string[]> => prisma.$transaction(async (tx) => {
-    const ids: string[] = [];
+  const commitItems = async (items: Validated[]): Promise<Array<{ id: string; operation: MemberOperation }>> => prisma.$transaction(async (tx) => {
+    const results: Array<{ id: string; operation: MemberOperation }> = [];
     for (const item of items) {
       const d = item.data;
-      const targetEntityId = (await tx.member.create({ data: { organizationId: audit.organizationId, memberCode: String(d.memberCode), firstName: String(d.firstName), middleName: d.middleName as string | null, lastName: d.lastName as string | null, displayName: d.displayName as string | null, gender: d.gender as string | null, dateOfBirth: d.dateOfBirth as Date | null, phone: d.phone as string | null, email: d.email as string | null, addressLine1: d.addressLine1 as string | null, addressLine2: d.addressLine2 as string | null, city: d.city as string | null, state: d.state as string | null, postalCode: d.postalCode as string | null, country: String(d.country), membershipStatus: String(d.membershipStatus), joinedOn: d.joinedOn as Date | null, notes: d.notes as string | null, metadata: asJson(d.metadata), customFields: asJson(d.customFields) } })).id;
-      ids.push(targetEntityId);
-      await tx.importRecord.create({ data: { organizationId: audit.organizationId, batchId: batch.id, rowNumber: item.rowNumber, recordKey: item.key, status: "committed", sourceData: asJson(item.source), normalizedData: asJson(item.data), validationErrors: [], targetEntityId, processedAt: new Date() } });
+      const operation = item.operation ?? "create";
+      const targetEntityId = operation === "update"
+        ? (await tx.member.update({ where: { id: item.targetEntityId! }, data: d })).id
+        : (await tx.member.create({ data: { ...(d as Prisma.MemberUncheckedCreateInput), organizationId: audit.organizationId } })).id;
+      results.push({ id: targetEntityId, operation });
+      await tx.importRecord.create({ data: { organizationId: audit.organizationId, batchId: batch.id, rowNumber: item.rowNumber, recordKey: item.key, status: operation === "create" ? "created" : "updated", sourceData: asJson(item.source), normalizedData: asJson(item.data), validationErrors: [], targetEntityId, processedAt: new Date() } });
     }
     await tx.importBatch.update({ where: { id: batch.id }, data: { committedRecords: { increment: items.length } } });
-    return ids;
+    return results;
   }, { maxWait: 15_000, timeout: 60_000 });
 
   const commitOrIsolateFailures = async (items: Validated[]): Promise<void> => {
     try {
-      createdIds.push(...await commitItems(items));
+      const results = await commitItems(items);
+      createdIds.push(...results.filter((result) => result.operation === "create").map((result) => result.id));
+      updatedIds.push(...results.filter((result) => result.operation === "update").map((result) => result.id));
     } catch (error) {
       if (items.length > 1) {
         const midpoint = Math.floor(items.length / 2);
@@ -286,6 +327,14 @@ async function commitMemberImport(prisma: AppPrisma, audit: AuditContext, filena
     }
 
     const allRejected = [...rejected, ...persistenceRejected];
+    for (let offset = 0; offset < skipped.length; offset += IMPORT_BATCH_SIZE) {
+      const items = skipped.slice(offset, offset + IMPORT_BATCH_SIZE);
+      await prisma.$transaction(async (tx) => {
+        for (const item of items) {
+          await tx.importRecord.create({ data: { organizationId: audit.organizationId, batchId: batch.id, rowNumber: item.rowNumber, recordKey: item.key, status: "skipped", sourceData: asJson(item.source), normalizedData: {}, validationErrors: [item.reason], processedAt: new Date() } });
+        }
+      }, { maxWait: 15_000, timeout: 60_000 });
+    }
     for (let offset = 0; offset < allRejected.length; offset += IMPORT_BATCH_SIZE) {
       const items = allRejected.slice(offset, offset + IMPORT_BATCH_SIZE);
       await prisma.$transaction(async (tx) => {
@@ -297,13 +346,14 @@ async function commitMemberImport(prisma: AppPrisma, audit: AuditContext, filena
     }
 
     const completedBatch = await prisma.$transaction(async (tx) => {
-      const updated = await tx.importBatch.update({ where: { id: batch.id }, data: { status: allRejected.length ? "partially_accepted" : "completed", acceptedRecords: createdIds.length, rejectedRecords: allRejected.length, completedAt: new Date() } });
-      await tx.auditLog.create({ data: { organizationId: audit.organizationId, actorUserId: audit.actorUserId, action: "IMPORT_COMMIT", entityType: "import_batch", entityId: batch.id, metadata: { actorRoles: audit.actorRoleNames, importedEntityType: "members", accepted: createdIds.length, rejected: allRejected.length, createdIds } } });
+      const committed = createdIds.length + updatedIds.length;
+      const updated = await tx.importBatch.update({ where: { id: batch.id }, data: { status: allRejected.length || skipped.length ? "partially_accepted" : "completed", acceptedRecords: committed, rejectedRecords: allRejected.length, completedAt: new Date(), metadata: { batch_code: `BATCH-${Date.now()}`, created: createdIds.length, updated: updatedIds.length, skipped: skipped.length, rejected: allRejected.length } } });
+      await tx.auditLog.create({ data: { organizationId: audit.organizationId, actorUserId: audit.actorUserId, action: "IMPORT_COMMIT", entityType: "import_batch", entityId: batch.id, metadata: { actorRoles: audit.actorRoleNames, importedEntityType: "members", accepted: committed, created: createdIds.length, updated: updatedIds.length, skipped: skipped.length, rejected: allRejected.length, createdIds, updatedIds } } });
       return updated;
     });
-    return { batch: completedBatch, accepted: createdIds.length, rejected: allRejected.length };
+    return { batch: completedBatch, accepted: createdIds.length + updatedIds.length, created: createdIds.length, updated: updatedIds.length, skipped: skipped.length, rejected: allRejected.length };
   } catch (error) {
-    await prisma.importBatch.update({ where: { id: batch.id }, data: { status: createdIds.length ? "partially_accepted" : "failed", completedAt: new Date() } }).catch(() => undefined);
+    await prisma.importBatch.update({ where: { id: batch.id }, data: { status: createdIds.length || updatedIds.length ? "partially_accepted" : "failed", completedAt: new Date() } }).catch(() => undefined);
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       throw new ImportCommitError(`Import stopped because one or more records already exist with a unique code. ${createdIds.length} records from earlier batches were saved.`, 409);
     }
@@ -330,7 +380,7 @@ export async function createExportWorkbook(prisma: AppPrisma, organizationId: st
       prisma.managementTerm.findMany({ where: { organizationId }, orderBy: { startDate: "desc" } }),
       prisma.managementAssignment.findMany({ where: { organizationId }, include: { member: true, position: true, term: true }, orderBy: { displayOrder: "asc" } }),
     ]);
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(members.map((m) => ({ "Member Code": m.memberCode ?? "", "First Name": m.firstName, "Middle Name": m.middleName ?? "", "Last Name": m.lastName ?? "", "Display Name": m.displayName ?? "", Gender: m.gender ?? "", "Date of Birth": iso(m.dateOfBirth).slice(0,10), Phone: m.phone ?? "", Email: m.email ?? "", "Address Line 1": m.addressLine1 ?? "", "Address Line 2": m.addressLine2 ?? "", City: m.city ?? "", State: m.state ?? "", "Postal Code": m.postalCode ?? "", Country: m.country, Status: m.membershipStatus, "Joined Date": iso(m.joinedOn).slice(0,10), Notes: m.notes ?? "", "Metadata JSON": jsonText(m.metadata), "Custom Fields JSON": jsonText(m.customFields) }))), "Members");
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(members.map((m) => { const category = categoryFromMemberCode(m.memberCode); return ({ "Member Code": m.memberCode ?? "", "First Name": m.firstName, "Middle Name": m.middleName ?? "", "Last Name": m.lastName ?? "", "Display Name": m.displayName ?? "", Gender: m.gender ?? "", "Date of Birth": iso(m.dateOfBirth).slice(0,10), "Member Category": category, Designation: category, Phone: m.phone ?? "", Email: m.email ?? "", "Address Line 1": m.addressLine1 ?? "", "Address Line 2": m.addressLine2 ?? "", City: m.city ?? "", State: m.state ?? "", "Postal Code": m.postalCode ?? "", Country: m.country, Status: m.membershipStatus, "Joined Date": iso(m.joinedOn).slice(0,10), Notes: m.notes ?? "", "Metadata JSON": jsonText(m.metadata), "Custom Fields JSON": jsonText(m.customFields) }); })), "Members");
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(positions.map((p) => ({ Code: p.code, Name: p.name, Description: p.description ?? "", "Display Order": p.displayOrder, Active: p.isActive ? "Yes" : "No", "Custom Fields JSON": jsonText(p.customFields) }))), "Management Positions");
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(terms.map((t) => ({ Name: t.name, "Start Date": iso(t.startDate).slice(0,10), "End Date": iso(t.endDate).slice(0,10), Status: t.status, Notes: t.notes ?? "", "Custom Fields JSON": jsonText(t.customFields) }))), "Management Terms");
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(assignments.map((a) => ({ "Member Code": a.member.memberCode ?? "", "Position Code": a.position.code, "Term Name": a.term.name, "Start Date": iso(a.startDate).slice(0,10), "End Date": iso(a.endDate).slice(0,10), "Display Order": a.displayOrder, Notes: a.notes ?? "", "Custom Fields JSON": jsonText(a.customFields) }))), "Management Assignments");
