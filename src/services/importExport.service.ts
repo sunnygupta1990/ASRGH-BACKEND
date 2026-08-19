@@ -6,7 +6,8 @@ import * as XLSX from "xlsx";
 type Row = Record<string, string>;
 type EntityType = "members" | "events" | "social_work" | "announcements";
 type Validated = { rowNumber: number; key: string; source: Row; data: Record<string, unknown> };
-type Rejected = { rowNumber: number; key: string; source: Row; error: string };
+type Rejected = { rowNumber: number; key: string; source: Row; error: string; rejectionCode?: "VALIDATION_ERROR" | "PERSISTENCE_ERROR" };
+export const IMPORT_BATCH_SIZE = 50;
 export class ImportCommitError extends Error {
   constructor(
     message: string,
@@ -166,14 +167,36 @@ export async function validateImportRows(prisma: AppPrisma, organizationId: stri
 
 export async function commitImport(prisma: AppPrisma, audit: AuditContext, entityType: EntityType, filename: string, rows: Row[]) {
   const { accepted, rejected } = await validateImportRows(prisma, audit.organizationId, entityType, rows);
+  if (entityType === "members") {
+    return commitMemberImport(prisma, audit, filename, rows, accepted, rejected);
+  }
   try {
     return await prisma.$transaction(async (tx) => {
     const batch = await tx.importBatch.create({ data: { organizationId: audit.organizationId, uploadedBy: audit.actorUserId, entityType, originalFilename: filename, status: rejected.length ? "partially_accepted" : "completed", totalRecords: rows.length, acceptedRecords: accepted.length, rejectedRecords: rejected.length, committedRecords: accepted.length, startedAt: new Date(), completedAt: new Date(), metadata: { batch_code: `BATCH-${Date.now()}` } } });
     const createdIds: string[] = [];
     for (const item of accepted) {
       let targetEntityId: string;
-      if (entityType === "members") { const d = item.data; targetEntityId = (await tx.member.create({ data: { organizationId: audit.organizationId, memberCode: String(d.memberCode), firstName: String(d.firstName), middleName: d.middleName as string | null, lastName: d.lastName as string | null, displayName: d.displayName as string | null, gender: d.gender as string | null, dateOfBirth: d.dateOfBirth as Date | null, phone: d.phone as string | null, email: d.email as string | null, addressLine1: d.addressLine1 as string | null, addressLine2: d.addressLine2 as string | null, city: d.city as string | null, state: d.state as string | null, postalCode: d.postalCode as string | null, country: String(d.country), membershipStatus: String(d.membershipStatus), joinedOn: d.joinedOn as Date | null, notes: d.notes as string | null, metadata: asJson(d.metadata), customFields: asJson(d.customFields) } })).id; }
-      else if (entityType === "events") { const d = item.data; targetEntityId = (await tx.event.create({ data: { organizationId: audit.organizationId, title: String(d.title), slug: String(d.slug), category: d.category as string | null, summary: d.summary as string | null, description: d.description as string | null, venue: d.venue as string | null, startAt: d.startAt as Date, endAt: d.endAt as Date | null, status: String(d.status), publishedAt: d.publishedAt as Date | null, metadata: asJson(d.metadata), customFields: asJson(d.customFields), album: { create: { organizationId: audit.organizationId, title: String(d.title) } } } })).id; }
+      if (entityType === "events") {
+        const d = item.data;
+        targetEntityId = (await tx.event.create({
+          data: {
+            organizationId: audit.organizationId,
+            title: String(d.title),
+            slug: String(d.slug),
+            category: d.category as string | null,
+            summary: d.summary as string | null,
+            description: d.description as string | null,
+            venue: d.venue as string | null,
+            startAt: d.startAt as Date,
+            endAt: d.endAt as Date | null,
+            status: String(d.status),
+            publishedAt: d.publishedAt as Date | null,
+            metadata: asJson(d.metadata),
+            customFields: asJson(d.customFields),
+            album: { create: { organizationId: audit.organizationId, title: String(d.title) } },
+          },
+        })).id;
+      }
       else if (entityType === "social_work") { const d = item.data; let categoryId: string | null = null; if (d.categoryName) { const category = await tx.socialWorkCategory.findFirst({ where: { organizationId: audit.organizationId, name: { equals: String(d.categoryName), mode: "insensitive" }, isActive: true } }); if (!category) throw new Error(`Social Work Category '${d.categoryName}' does not exist or is inactive`); categoryId = category.id; } targetEntityId = (await tx.socialWorkItem.create({ data: { organizationId: audit.organizationId, title: String(d.title), slug: String(d.slug), summary: d.summary as string | null, description: d.description as string | null, startDate: d.startDate as Date | null, endDate: d.endDate as Date | null, status: String(d.status), displayOrder: Number(d.displayOrder), publishedAt: d.publishedAt as Date | null, categoryId, metadata: asJson(d.metadata), customFields: asJson(d.customFields) } })).id; }
       else { const d = item.data; targetEntityId = (await tx.announcement.create({ data: { organizationId: audit.organizationId, title: String(d.title), slug: String(d.slug), summary: d.summary as string | null, body: String(d.body), status: String(d.status), publishedAt: d.publishedAt as Date | null, expiresAt: d.expiresAt as Date | null, metadata: asJson(d.metadata), customFields: asJson(d.customFields) } })).id; }
       createdIds.push(targetEntityId);
@@ -203,6 +226,89 @@ export async function commitImport(prisma: AppPrisma, audit: AuditContext, entit
       `Import could not be completed: ${message}. No imported records were saved.`,
       422,
     );
+  }
+}
+
+async function commitMemberImport(prisma: AppPrisma, audit: AuditContext, filename: string, rows: Row[], accepted: Validated[], rejected: Rejected[]) {
+  const batch = await prisma.importBatch.create({
+    data: {
+      organizationId: audit.organizationId,
+      uploadedBy: audit.actorUserId,
+      entityType: "members",
+      originalFilename: filename,
+      status: "processing",
+      totalRecords: rows.length,
+      acceptedRecords: accepted.length,
+      rejectedRecords: rejected.length,
+      committedRecords: 0,
+      startedAt: new Date(),
+      metadata: { batch_code: `BATCH-${Date.now()}` },
+    },
+  });
+  const createdIds: string[] = [];
+  const persistenceRejected: Rejected[] = [];
+
+  const commitItems = async (items: Validated[]): Promise<string[]> => prisma.$transaction(async (tx) => {
+    const ids: string[] = [];
+    for (const item of items) {
+      const d = item.data;
+      const targetEntityId = (await tx.member.create({ data: { organizationId: audit.organizationId, memberCode: String(d.memberCode), firstName: String(d.firstName), middleName: d.middleName as string | null, lastName: d.lastName as string | null, displayName: d.displayName as string | null, gender: d.gender as string | null, dateOfBirth: d.dateOfBirth as Date | null, phone: d.phone as string | null, email: d.email as string | null, addressLine1: d.addressLine1 as string | null, addressLine2: d.addressLine2 as string | null, city: d.city as string | null, state: d.state as string | null, postalCode: d.postalCode as string | null, country: String(d.country), membershipStatus: String(d.membershipStatus), joinedOn: d.joinedOn as Date | null, notes: d.notes as string | null, metadata: asJson(d.metadata), customFields: asJson(d.customFields) } })).id;
+      ids.push(targetEntityId);
+      await tx.importRecord.create({ data: { organizationId: audit.organizationId, batchId: batch.id, rowNumber: item.rowNumber, recordKey: item.key, status: "committed", sourceData: asJson(item.source), normalizedData: asJson(item.data), validationErrors: [], targetEntityId, processedAt: new Date() } });
+    }
+    await tx.importBatch.update({ where: { id: batch.id }, data: { committedRecords: { increment: items.length } } });
+    return ids;
+  }, { maxWait: 15_000, timeout: 60_000 });
+
+  const commitOrIsolateFailures = async (items: Validated[]): Promise<void> => {
+    try {
+      createdIds.push(...await commitItems(items));
+    } catch (error) {
+      if (items.length > 1) {
+        const midpoint = Math.floor(items.length / 2);
+        await commitOrIsolateFailures(items.slice(0, midpoint));
+        await commitOrIsolateFailures(items.slice(midpoint));
+        return;
+      }
+
+      const item = items[0];
+      const message = error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
+        ? "Member Code must be unique"
+        : error instanceof Error ? error.message : "Unable to persist member";
+      persistenceRejected.push({ rowNumber: item.rowNumber, key: item.key, source: item.source, error: message, rejectionCode: "PERSISTENCE_ERROR" });
+    }
+  };
+
+  try {
+    for (let offset = 0; offset < accepted.length; offset += IMPORT_BATCH_SIZE) {
+      const items = accepted.slice(offset, offset + IMPORT_BATCH_SIZE);
+      await commitOrIsolateFailures(items);
+    }
+
+    const allRejected = [...rejected, ...persistenceRejected];
+    for (let offset = 0; offset < allRejected.length; offset += IMPORT_BATCH_SIZE) {
+      const items = allRejected.slice(offset, offset + IMPORT_BATCH_SIZE);
+      await prisma.$transaction(async (tx) => {
+        for (const item of items) {
+          const record = await tx.importRecord.create({ data: { organizationId: audit.organizationId, batchId: batch.id, rowNumber: item.rowNumber, recordKey: item.key, status: "rejected", sourceData: asJson(item.source), normalizedData: {}, validationErrors: [item.error], processedAt: new Date() } });
+          await tx.rejectedRecord.create({ data: { organizationId: audit.organizationId, importRecordId: record.id, rejectionCode: item.rejectionCode ?? "VALIDATION_ERROR", rejectionReason: item.error } });
+        }
+      }, { maxWait: 15_000, timeout: 60_000 });
+    }
+
+    const completedBatch = await prisma.$transaction(async (tx) => {
+      const updated = await tx.importBatch.update({ where: { id: batch.id }, data: { status: allRejected.length ? "partially_accepted" : "completed", acceptedRecords: createdIds.length, rejectedRecords: allRejected.length, completedAt: new Date() } });
+      await tx.auditLog.create({ data: { organizationId: audit.organizationId, actorUserId: audit.actorUserId, action: "IMPORT_COMMIT", entityType: "import_batch", entityId: batch.id, metadata: { actorRoles: audit.actorRoleNames, importedEntityType: "members", accepted: createdIds.length, rejected: allRejected.length, createdIds } } });
+      return updated;
+    });
+    return { batch: completedBatch, accepted: createdIds.length, rejected: allRejected.length };
+  } catch (error) {
+    await prisma.importBatch.update({ where: { id: batch.id }, data: { status: createdIds.length ? "partially_accepted" : "failed", completedAt: new Date() } }).catch(() => undefined);
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw new ImportCommitError(`Import stopped because one or more records already exist with a unique code. ${createdIds.length} records from earlier batches were saved.`, 409);
+    }
+    const message = error instanceof Error ? error.message : "Unable to commit import";
+    throw new ImportCommitError(`Import stopped: ${message}. ${createdIds.length} records from earlier batches were saved.`, 422);
   }
 }
 
