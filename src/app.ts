@@ -13,12 +13,16 @@ import adminOperationsRouter from "./routes/adminOperations";
 import managementRouter from "./routes/management";
 import staffRouter from "./routes/staff";
 import { AppPrisma } from "./config/prisma";
+import { createPublicationRouter, PublishPublicContent } from "./routes/publication";
 
 export type PrismaProvider = () => AppPrisma;
 
 export function createApp(
   getPrisma: PrismaProvider,
   photosRouter: Router,
+  publishPublicContent: PublishPublicContent = async () => {
+    throw new Error("Public cache invalidation is unavailable in this runtime");
+  },
 ) {
   const app = express();
 
@@ -76,6 +80,7 @@ export function createApp(
   app.use("/api/admin/operations", adminOperationsRouter);
   app.use("/api/admin/management", managementRouter);
   app.use("/api/admin/staff", staffRouter);
+  app.use("/api/admin/public-content", createPublicationRouter(publishPublicContent));
   app.use("/api/members", membersRouter);
   app.use("/api/events", eventsRouter);
   app.use("/api/public", publicRouter);

@@ -11,7 +11,8 @@
   },
   "vars": {
     "JWT_EXPIRES_IN": "8h",
-    "PUBLIC_ORGANIZATION_CODE": "ASRGH"
+    "PUBLIC_ORGANIZATION_CODE": "ASRGH",
+    "PUBLIC_CACHE_TTL_SECONDS": "3600"
   },
   "r2_buckets": [
     {

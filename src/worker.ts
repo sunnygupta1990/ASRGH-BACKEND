@@ -5,6 +5,10 @@ import { httpServerHandler } from "cloudflare:node";
 import { createRequestPrismaClient } from "./config/prisma";
 import { createApp } from "./app";
 import photosRouter from "./routes/photos.worker";
+import {
+  purgePublicContentCache,
+  serveWithPublicContentCache,
+} from "./services/publicContentCache.service";
 
 type R2LikeObject = {
   body: ReadableStream;
@@ -23,6 +27,7 @@ type CloudflareEnv = {
   MEDIA_BUCKET: R2LikeBucket;
   DATABASE_URL: string;
   PUBLIC_ORGANIZATION_CODE: string;
+  PUBLIC_CACHE_TTL_SECONDS: string;
 };
 
 const workerEnv = env as unknown as CloudflareEnv;
@@ -30,7 +35,10 @@ const workerEnv = env as unknown as CloudflareEnv;
 const app = createApp(
   () => createRequestPrismaClient(workerEnv.DATABASE_URL),
   photosRouter,
-  workerEnv.PUBLIC_ORGANIZATION_CODE,
+  () => purgePublicContentCache({
+    cache: caches.default,
+    namespace: workerEnv.PUBLIC_ORGANIZATION_CODE,
+  }),
 );
 
 app.get("/media/*path", async (req, res) => {
@@ -84,6 +92,20 @@ app.get("/media/*path", async (req, res) => {
 
 app.listen(3000);
 
-export default httpServerHandler({
+const originHandler = httpServerHandler({
   port: 3000,
 });
+
+export default {
+  fetch(request: Request): Promise<Response> {
+    return serveWithPublicContentCache(
+      request,
+      () => originHandler.fetch(request),
+      {
+        cache: caches.default,
+        namespace: workerEnv.PUBLIC_ORGANIZATION_CODE,
+        ttlSeconds: Number(workerEnv.PUBLIC_CACHE_TTL_SECONDS),
+      },
+    );
+  },
+};

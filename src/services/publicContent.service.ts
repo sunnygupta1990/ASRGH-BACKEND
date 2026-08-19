@@ -540,3 +540,77 @@ export async function getPublicMembers(
     };
   });
 }
+
+export async function getPublicAnnouncements(
+  prisma: AppPrisma,
+  organizationId: string,
+) {
+  const now = new Date();
+  return prisma.announcement.findMany({
+    where: {
+      organizationId,
+      deletedAt: null,
+      status: "published",
+      OR: [{ publishedAt: null }, { publishedAt: { lte: now } }],
+      AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }],
+    },
+    select: {
+      id: true,
+      title: true,
+      slug: true,
+      summary: true,
+      body: true,
+      status: true,
+      publishedAt: true,
+      expiresAt: true,
+      coverMediaId: true,
+      customFields: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export async function getPublicSocialWork(
+  prisma: AppPrisma,
+  organizationId: string,
+) {
+  const items = await prisma.socialWorkItem.findMany({
+    where: {
+      organizationId,
+      deletedAt: null,
+      status: { notIn: ["draft", "archived", "deleted"] },
+    },
+    select: {
+      id: true,
+      title: true,
+      slug: true,
+      summary: true,
+      description: true,
+      startDate: true,
+      endDate: true,
+      status: true,
+      displayOrder: true,
+      publishedAt: true,
+      coverMediaId: true,
+      metadata: true,
+      customFields: true,
+      category: {
+        select: { id: true, code: true, name: true, displayOrder: true },
+      },
+    },
+    orderBy: [{ displayOrder: "asc" }, { startDate: "desc" }],
+  });
+
+  return items.map(({ category, ...item }) => ({
+    ...item,
+    category: category
+      ? {
+          id: category.id,
+          name: category.name,
+          slug: category.code,
+          displayOrder: category.displayOrder,
+        }
+      : null,
+  }));
+}
