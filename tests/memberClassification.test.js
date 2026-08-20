@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { categoryFromMemberCode, classifiedCustomFields, compareMemberCodes } = require('../dist/services/memberClassification.service.js');
-const { publicAddressFields } = require('../dist/services/publicContent.service.js');
+const { isAssignmentCurrent, publicAddressFields } = require('../dist/services/publicContent.service.js');
 const { classifyExistingMembers } = require('../dist/scripts/classifyMembers.js');
 
 test('member code authoritatively classifies category and designation', () => {
@@ -27,6 +27,19 @@ test('public address exposes only address line 2 and city when enabled', () => {
     addressLine1: null, addressLine2: null, city: null, state: null,
   });
   assert.equal(Object.values(publicAddressFields(true, { addressLine2: 'Apartment 4B', city: 'New Delhi' })).includes('123 Main Street'), false);
+});
+
+test('management assignment must have active position, active term, and current dates', () => {
+  const now = new Date('2026-08-20T12:00:00Z');
+  const current = {
+    startDate: null, endDate: null,
+    position: { isActive: true },
+    term: { startDate: new Date('2026-01-01'), endDate: new Date('2026-12-31'), status: 'active' },
+  };
+  assert.equal(isAssignmentCurrent(current, now), true);
+  assert.equal(isAssignmentCurrent({ ...current, endDate: new Date('2025-12-31') }, now), false);
+  assert.equal(isAssignmentCurrent({ ...current, position: { isActive: false } }, now), false);
+  assert.equal(isAssignmentCurrent({ ...current, term: { ...current.term, status: 'inactive' } }, now), false);
 });
 
 test('one-time classification covers all records with an in-place JSONB update', async () => {

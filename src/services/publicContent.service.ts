@@ -76,14 +76,16 @@ export function publicAddressFields(
   };
 }
 
-function isAssignmentCurrent(
+export function isAssignmentCurrent(
   assignment: {
     startDate: Date | null;
     endDate: Date | null;
     term: {
       startDate: Date;
       endDate: Date | null;
+      status: string;
     };
+    position: { isActive: boolean };
   },
   now: Date,
 ): boolean {
@@ -92,6 +94,10 @@ function isAssignmentCurrent(
   const termEnd = assignment.term.endDate?.toISOString().slice(0, 10);
   const assignmentStart = assignment.startDate?.toISOString().slice(0, 10);
   const assignmentEnd = assignment.endDate?.toISOString().slice(0, 10);
+
+  if (!assignment.position.isActive || assignment.term.status.toLowerCase() !== "active") {
+    return false;
+  }
 
   if (termStart > today) {
     return false;
