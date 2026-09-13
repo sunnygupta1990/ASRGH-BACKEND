@@ -26,11 +26,17 @@ type R2LikeBucket = {
 type CloudflareEnv = {
   MEDIA_BUCKET: R2LikeBucket;
   DATABASE_URL: string;
+  CORS_ORIGINS: string;
   PUBLIC_ORGANIZATION_CODE: string;
   PUBLIC_CACHE_TTL_SECONDS: string;
 };
 
 const workerEnv = env as unknown as CloudflareEnv;
+
+const publicCacheOrigins = (workerEnv.CORS_ORIGINS ?? "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 const app = createApp(
   () => createRequestPrismaClient(workerEnv.DATABASE_URL),
@@ -38,6 +44,7 @@ const app = createApp(
   () => purgePublicContentCache({
     cache: caches.default,
     namespace: workerEnv.PUBLIC_ORGANIZATION_CODE,
+    origins: publicCacheOrigins,
   }),
 );
 

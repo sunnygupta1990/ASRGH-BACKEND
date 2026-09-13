@@ -23,11 +23,19 @@ class MemoryCache {
 }
 
 const options = (cache, ttlSeconds = 3600) => ({ cache, ttlSeconds, namespace: 'ASRGH' });
+const productionOrigin = 'https://aggarwalsabha.co.in';
+const workersOrigin = 'https://asrgh.sunnygupta1990.workers.dev';
+
+function originRequest(path, origin = productionOrigin) {
+  return new Request(`https://api.example.com${path}`, {
+    headers: origin ? { Origin: origin } : undefined,
+  });
+}
 
 test('public cache miss queries origin and stores the successful response', async () => {
   const cache = new MemoryCache();
   let neonQueries = 0;
-  const request = new Request('https://api.example.com/api/public/members');
+  const request = originRequest('/api/public/members');
   const response = await serveWithPublicContentCache(request, async () => {
     neonQueries += 1;
     return Response.json({ data: ['all', 'members'] });
@@ -39,7 +47,7 @@ test('public cache miss queries origin and stores the successful response', asyn
 
 test('public cache hit does not query origin', async () => {
   const cache = new MemoryCache();
-  const request = new Request('https://api.example.com/api/public/events');
+  const request = originRequest('/api/public/events');
   await cache.put(createPublicContentCacheKey(request, 'ASRGH'), Response.json({ cached: true }));
   let neonQueries = 0;
   const response = await serveWithPublicContentCache(request, async () => {
@@ -50,26 +58,82 @@ test('public cache hit does not query origin', async () => {
   assert.deepEqual(await response.json(), { cached: true });
 });
 
-test('cache expiry uses the configured TTL', async () => {
+test('different request origins never share a public cache entry', async () => {
+  const cache = new MemoryCache();
+  let neonQueries = 0;
+
+  const productionRequest = originRequest('/api/public/content', productionOrigin);
+  const workersRequest = originRequest('/api/public/content', workersOrigin);
+
+  const first = await serveWithPublicContentCache(productionRequest, async () => {
+    neonQueries += 1;
+    return new Response(JSON.stringify({ source: 'production' }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': productionOrigin,
+      },
+    });
+  }, options(cache));
+  assert.equal(first.headers.get('access-control-allow-origin'), productionOrigin);
+
+  const second = await serveWithPublicContentCache(workersRequest, async () => {
+    neonQueries += 1;
+    return new Response(JSON.stringify({ source: 'workers' }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': workersOrigin,
+      },
+    });
+  }, options(cache));
+  assert.equal(second.headers.get('access-control-allow-origin'), workersOrigin);
+  assert.equal(neonQueries, 2);
+  assert.equal(cache.entries.size, 2);
+
+  const productionHit = await serveWithPublicContentCache(productionRequest, async () => {
+    throw new Error('production cache should have been hit');
+  }, options(cache));
+  assert.equal(productionHit.headers.get('access-control-allow-origin'), productionOrigin);
+});
+
+test('requests without an Origin header use a separate cache partition', async () => {
+  const cache = new MemoryCache();
+  const noOriginRequest = originRequest('/api/public/settings', null);
+  const browserRequest = originRequest('/api/public/settings', productionOrigin);
+
+  assert.notEqual(
+    createPublicContentCacheKey(noOriginRequest, 'ASRGH').url,
+    createPublicContentCacheKey(browserRequest, 'ASRGH').url,
+  );
+});
+
+test('cache expiry uses the configured TTL and v2 namespace marker', async () => {
   const cache = new MemoryCache();
   await serveWithPublicContentCache(
-    new Request('https://api.example.com/api/public/settings'),
+    originRequest('/api/public/settings'),
     async () => Response.json({ ok: true }),
     options(cache, 300),
   );
   assert.equal(cache.putResponses[0].headers.get('cache-control'), 'public, max-age=300');
+  assert.equal(cache.putResponses[0].headers.get('x-asrgh-cache-namespace'), 'public-content-v2');
 });
 
-test('publish invalidates every public-content key and next request is fresh', async () => {
+test('publish invalidates every public-content key for every configured origin', async () => {
   const cache = new MemoryCache();
+  const origins = [productionOrigin, workersOrigin];
+
   for (const path of PUBLIC_CONTENT_PATHS) {
     await cache.put(createPublicContentCacheKey(path, 'ASRGH'), Response.json({ stale: true }));
+    for (const origin of origins) {
+      await cache.put(createPublicContentCacheKey(path, 'ASRGH', origin), Response.json({ stale: true }));
+    }
   }
-  await purgePublicContentCache({ cache, namespace: 'ASRGH' });
+
+  await purgePublicContentCache({ cache, namespace: 'ASRGH', origins });
   assert.equal(cache.entries.size, 0);
+
   let neonQueries = 0;
   const response = await serveWithPublicContentCache(
-    new Request('https://api.example.com/api/public/content'),
+    originRequest('/api/public/content'),
     async () => { neonQueries += 1; return Response.json({ fresh: true }); },
     options(cache),
   );
@@ -99,11 +163,15 @@ test('cache read and write failure falls back to the origin response', async () 
   };
   let neonQueries = 0;
   const response = await serveWithPublicContentCache(
-    new Request('https://api.example.com/api/public/members'),
+    originRequest('/api/public/members'),
     async () => { neonQueries += 1; return Response.json({ available: true }); },
     options(cache),
   );
   assert.equal(neonQueries, 1);
   assert.deepEqual(await response.json(), { available: true });
-  await assert.rejects(() => purgePublicContentCache({ cache, namespace: 'ASRGH' }));
+  await assert.rejects(() => purgePublicContentCache({
+    cache,
+    namespace: 'ASRGH',
+    origins: [productionOrigin, workersOrigin],
+  }));
 });

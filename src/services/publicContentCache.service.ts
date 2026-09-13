@@ -7,6 +7,9 @@ export const PUBLIC_CONTENT_PATHS = [
   "/api/public/social-work",
 ] as const;
 
+const PUBLIC_CONTENT_CACHE_VERSION = "v2";
+const NO_ORIGIN_CACHE_PARTITION = "__no_origin__";
+
 export interface PublicContentCache {
   match(request: Request): Promise<Response | undefined>;
   put(request: Request, response: Response): Promise<void>;
@@ -19,22 +22,46 @@ export interface PublicContentCacheOptions {
   ttlSeconds: number;
 }
 
+export interface PublicContentCachePurgeOptions {
+  cache: PublicContentCache;
+  namespace: string;
+  origins?: readonly string[];
+}
+
 export function isPublicContentRequest(request: Request): boolean {
   if (request.method !== "GET") return false;
   const path = new URL(request.url).pathname.replace(/\/$/, "");
   return (PUBLIC_CONTENT_PATHS as readonly string[]).includes(path);
 }
 
+function normalizeOrigin(origin: string | null | undefined): string {
+  const trimmedOrigin = origin?.trim();
+  if (!trimmedOrigin) return NO_ORIGIN_CACHE_PARTITION;
+
+  try {
+    return new URL(trimmedOrigin).origin;
+  } catch {
+    // Origin headers should be valid serialized origins. Keep malformed values
+    // isolated instead of letting them share another request's cache entry.
+    return trimmedOrigin;
+  }
+}
+
 export function createPublicContentCacheKey(
   requestOrPath: Request | string,
   namespace: string,
+  origin?: string | null,
 ): Request {
-  const path = typeof requestOrPath === "string"
-    ? requestOrPath
-    : new URL(requestOrPath.url).pathname.replace(/\/$/, "");
+  const isRequest = typeof requestOrPath !== "string";
+  const path = isRequest
+    ? new URL(requestOrPath.url).pathname.replace(/\/$/, "")
+    : requestOrPath;
+  const requestOrigin = isRequest ? requestOrPath.headers.get("Origin") : origin;
   const encodedNamespace = encodeURIComponent(namespace || "default");
+  const encodedOrigin = encodeURIComponent(normalizeOrigin(requestOrigin));
+
   return new Request(
-    `https://public-content-cache.asrgh.internal/v1/${encodedNamespace}${path}`,
+    `https://public-content-cache.asrgh.internal/${PUBLIC_CONTENT_CACHE_VERSION}/${encodedNamespace}/${encodedOrigin}${path}`,
     { method: "GET" },
   );
 }
@@ -66,7 +93,7 @@ export async function serveWithPublicContentCache(
     "Cache-Control",
     `public, max-age=${Math.floor(options.ttlSeconds)}`,
   );
-  cachedResponse.headers.set("X-ASRGH-Cache-Namespace", "public-content-v1");
+  cachedResponse.headers.set("X-ASRGH-Cache-Namespace", "public-content-v2");
 
   try {
     await options.cache.put(key, cachedResponse);
@@ -78,11 +105,20 @@ export async function serveWithPublicContentCache(
 }
 
 export async function purgePublicContentCache(
-  options: Pick<PublicContentCacheOptions, "cache" | "namespace">,
+  options: PublicContentCachePurgeOptions,
 ): Promise<void> {
+  const origins = [
+    undefined,
+    ...new Set((options.origins ?? []).map((origin) => origin.trim()).filter(Boolean)),
+  ];
+
   const results = await Promise.allSettled(
-    PUBLIC_CONTENT_PATHS.map((path) =>
-      options.cache.delete(createPublicContentCacheKey(path, options.namespace)),
+    origins.flatMap((origin) =>
+      PUBLIC_CONTENT_PATHS.map((path) =>
+        options.cache.delete(
+          createPublicContentCacheKey(path, options.namespace, origin),
+        ),
+      ),
     ),
   );
   const failures = results.filter((result) => result.status === "rejected");
