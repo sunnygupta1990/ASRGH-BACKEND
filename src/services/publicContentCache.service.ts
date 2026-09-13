@@ -72,8 +72,12 @@ export async function serveWithPublicContentCache(
   options: PublicContentCacheOptions,
 ): Promise<Response> {
   if (!isPublicContentRequest(request)) return fetchFromOrigin();
-  if (!Number.isFinite(options.ttlSeconds) || options.ttlSeconds <= 0) {
-    console.error("PUBLIC_CONTENT_CACHE_CONFIG_ERROR: PUBLIC_CACHE_TTL_SECONDS must be a positive number");
+  // A zero TTL intentionally disables the custom Cache API. Production uses
+  // this mode for reliability; caching can be reintroduced later without
+  // changing browser routing or CORS behavior.
+  if (options.ttlSeconds === 0) return fetchFromOrigin();
+  if (!Number.isFinite(options.ttlSeconds) || options.ttlSeconds < 0) {
+    console.error("PUBLIC_CONTENT_CACHE_CONFIG_ERROR: PUBLIC_CACHE_TTL_SECONDS must be zero or a positive number");
     return fetchFromOrigin();
   }
 

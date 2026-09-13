@@ -38,17 +38,22 @@ export function createApp(
     }),
   );
 
-  const allowedOrigins = (
-    process.env.CORS_ORIGINS ?? "http://localhost:5173"
-  )
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+  // Production uses the same public origin for the website and API. Keep the
+  // production domain and local Vite origin intrinsically allowed so a missing
+  // or stale CORS_ORIGINS secret can never take the production site down.
+  const allowedOrigins = new Set([
+    "https://aggarwalsabha.co.in",
+    "http://localhost:5173",
+    ...(process.env.CORS_ORIGINS ?? "")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+  ]);
 
   app.use(
     cors({
       origin(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (!origin || allowedOrigins.has(origin)) {
           callback(null, true);
           return;
         }
