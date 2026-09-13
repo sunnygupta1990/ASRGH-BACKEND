@@ -60,19 +60,37 @@ function toPrismaCustomFields(
 }
 
 router.get("/", requireAuth, requirePermission(PERMISSIONS.membersRead), async (req: AuthenticatedRequest, res) => {
-  const query = z.object({ search: z.string().trim().optional(), status: z.string().trim().optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(200).default(100) }).parse(req.query);
+  const query = z.object({ search: z.string().trim().optional(), status: z.string().trim().optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(50) }).parse(req.query);
   const where: Prisma.MemberWhereInput = {
     organizationId: req.user!.organizationId, deletedAt: null,
     ...(query.status ? { membershipStatus: query.status } : {}),
     ...(query.search ? { OR: [{ memberCode: { contains: query.search, mode: "insensitive" } }, { firstName: { contains: query.search, mode: "insensitive" } }, { middleName: { contains: query.search, mode: "insensitive" } }, { lastName: { contains: query.search, mode: "insensitive" } }, { displayName: { contains: query.search, mode: "insensitive" } }, { phone: { contains: query.search } }, { email: { contains: query.search, mode: "insensitive" } }, { city: { contains: query.search, mode: "insensitive" } }, { state: { contains: query.search, mode: "insensitive" } }] } : {}),
   };
   const [members, total] = await Promise.all([
-  req.prisma.member.findMany({
-    where,
-    include: { profileMedia: true, assignments: { include: { position: true, term: true }, orderBy: { displayOrder: "asc" } } },
-    orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
-    skip: (query.page - 1) * query.pageSize, take: query.pageSize,
-  }), req.prisma.member.count({ where })]);
+    req.prisma.member.findMany({
+      where,
+      select: {
+        id: true, memberCode: true, firstName: true, middleName: true, lastName: true,
+        displayName: true, gender: true, dateOfBirth: true, phone: true, email: true,
+        addressLine1: true, addressLine2: true, city: true, state: true, postalCode: true,
+        country: true, membershipStatus: true, joinedOn: true, notes: true, profileMediaId: true,
+        metadata: true, customFields: true,
+        profileMedia: { select: { storageKey: true, isPublic: true, deletedAt: true } },
+        assignments: {
+          orderBy: { displayOrder: "asc" },
+          select: {
+            id: true, memberId: true, positionId: true, termId: true, startDate: true, endDate: true,
+            displayOrder: true, notes: true, customFields: true, current: true,
+            position: { select: { id: true, code: true, name: true, displayOrder: true, description: true, isActive: true, customFields: true } },
+            term: { select: { id: true, name: true, startDate: true, endDate: true, status: true, notes: true, customFields: true } },
+          },
+        },
+      },
+      orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
+      skip: (query.page - 1) * query.pageSize, take: query.pageSize,
+    }),
+    req.prisma.member.count({ where }),
+  ]);
 
   return res.json({
     success: true,

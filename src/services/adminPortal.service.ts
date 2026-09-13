@@ -34,8 +34,6 @@ export async function getAdminPortalState(
   const [
     organization,
     websiteSetting,
-    members,
-    events,
     categories,
     socialWorkItems,
     announcements,
@@ -54,25 +52,6 @@ export async function getAdminPortalState(
     }),
     prisma.websiteSetting.findUnique({
       where: { organizationId },
-    }),
-    prisma.member.findMany({
-      where: { organizationId, deletedAt: null },
-      include: { profileMedia: true, assignments: { include: { position: true, term: true }, orderBy: { displayOrder: "asc" } } },
-      orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
-    }),
-    prisma.event.findMany({
-      where: { organizationId, deletedAt: null },
-      include: {
-        album: {
-          include: {
-            photos: {
-              include: { mediaAsset: true },
-              orderBy: { displayOrder: "asc" },
-            },
-          },
-        },
-      },
-      orderBy: { startAt: "desc" },
     }),
     prisma.socialWorkCategory.findMany({
       where: { organizationId },
@@ -161,8 +140,10 @@ export async function getAdminPortalState(
     organization: can("settings.read") ? organization : null,
     websiteSetting: can("settings.read") ? websiteSetting : null,
     adminUserId,
-    members: can("members.read") ? members : [],
-    events: can("events.read") || can("photos.read") ? events : [],
+    // Members and events are loaded by their dedicated paginated endpoints.
+    // Keeping them out of this aggregate response prevents Worker resource exhaustion.
+    members: [],
+    events: [],
     socialWorkCategories: can("social_work.read") ? categories : [],
     socialWorkActivities: can("social_work.read") ? socialWorkItems : [],
     announcements: can("announcements.read") ? announcements : [],
