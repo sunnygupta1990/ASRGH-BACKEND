@@ -15,6 +15,7 @@ import {
   updateSettingsBundle,
 } from "../services/adminOperations.service";
 import { commitImport, createExportWorkbook, ImportCommitError } from "../services/importExport.service";
+import { clearClosedRejectedRecords, listRejectedRecords, manageRejectedRecord } from "../services/rejectedRecords.service";
 
 const router = Router();
 const objectSchema = z.record(z.string(), z.unknown());
@@ -84,6 +85,32 @@ router.patch("/admin-users/:id", requireAuth, requirePermission(PERMISSIONS.admi
   } catch (error) {
     return res.status(400).json({ success: false, message: error instanceof Error ? error.message : "Invalid admin user update" });
   }
+});
+
+const rejectionModule = z.enum(["all", "members", "events", "social_work", "announcements"]);
+router.get("/rejected-records", requireAuth, requirePermission(PERMISSIONS.importExport), async (req, res) => {
+  const parsed = z.object({ status: z.enum(["open", "closed", "all"]).default("open"), module: rejectionModule.default("all"), page: z.coerce.number().int().min(1).max(100000).default(1) }).safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ success: false, message: "Invalid rejected-record filters" });
+  const data = await listRejectedRecords(req.prisma, req.user!.organizationId, parsed.data.status, parsed.data.module, parsed.data.page);
+  return res.json({ success: true, data });
+});
+
+router.post("/rejected-records/actions", requireAuth, requirePermission(PERMISSIONS.importExport), async (req, res) => {
+  const parsed = z.object({ action: z.enum(["dismiss", "delete", "retry", "save"]), ids: z.array(z.string().uuid()).min(1).max(50), correctedData: z.record(z.string().max(200), z.string().max(100000)).optional() }).strict().refine((data) => !data.correctedData || data.ids.length === 1, "Corrections require one record").safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ success: false, message: "Invalid rejected-record action" });
+  const results = [];
+  for (const id of new Set(parsed.data.ids)) {
+    try { results.push(await manageRejectedRecord(req.prisma, requestAuditContext(req), id, parsed.data.action, parsed.data.correctedData)); }
+    catch { results.push({ id, outcome: "error", message: "Unable to apply action. The record may have changed or be unavailable; refresh and retry." }); }
+  }
+  return res.json({ success: true, data: { results } });
+});
+
+router.post("/rejected-records/clear", requireAuth, requirePermission(PERMISSIONS.importExport), async (req, res) => {
+  const parsed = z.object({ module: rejectionModule }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ success: false, message: "Invalid module" });
+  const data = await clearClosedRejectedRecords(req.prisma, requestAuditContext(req), parsed.data.module);
+  return res.json({ success: true, data });
 });
 
 router.patch("/rejected-records/:id/resolve", requireAuth, requirePermission(PERMISSIONS.importExport), async (req, res) => {

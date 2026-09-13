@@ -43,14 +43,14 @@ function jsonObject(text: string, label: string) {
   return parsed as Record<string, unknown>;
 }
 
-async function existingKeys(prisma: AppPrisma, organizationId: string, type: EntityType) {
+async function existingKeys(prisma: AppPrisma | Prisma.TransactionClient, organizationId: string, type: EntityType) {
   if (type === "members") return new Set((await prisma.member.findMany({ where: { organizationId }, select: { memberCode: true } })).flatMap((x) => x.memberCode ? [x.memberCode.toLowerCase()] : []));
   if (type === "events") return new Set((await prisma.event.findMany({ where: { organizationId }, select: { slug: true, customFields: true } })).flatMap((x) => [x.slug.toLowerCase(), String((x.customFields as Record<string, unknown>)?.event_code ?? "").toLowerCase()]));
   if (type === "social_work") return new Set((await prisma.socialWorkItem.findMany({ where: { organizationId }, select: { slug: true, customFields: true } })).flatMap((x) => [x.slug.toLowerCase(), String((x.customFields as Record<string, unknown>)?.activity_code ?? "").toLowerCase()]));
   return new Set((await prisma.announcement.findMany({ where: { organizationId }, select: { slug: true, customFields: true } })).flatMap((x) => [x.slug.toLowerCase(), String((x.customFields as Record<string, unknown>)?.announcement_code ?? "").toLowerCase()]));
 }
 
-export async function validateImportRows(prisma: AppPrisma, organizationId: string, type: EntityType, rows: Row[]) {
+export async function validateImportRows(prisma: AppPrisma | Prisma.TransactionClient, organizationId: string, type: EntityType, rows: Row[]) {
   const used = type === "members" ? new Set<string>() : await existingKeys(prisma, organizationId, type);
   const existingMembers = type === "members"
     ? await prisma.member.findMany({
@@ -200,16 +200,12 @@ export async function validateImportRows(prisma: AppPrisma, organizationId: stri
   return { accepted, rejected, skipped };
 }
 
-export async function commitImport(prisma: AppPrisma, audit: AuditContext, entityType: EntityType, filename: string, rows: Row[]) {
-  const { accepted, rejected, skipped } = await validateImportRows(prisma, audit.organizationId, entityType, rows);
+export async function persistImportRow(tx: Prisma.TransactionClient, audit: AuditContext, entityType: EntityType, item: Validated): Promise<string> {
   if (entityType === "members") {
-    return commitMemberImport(prisma, audit, filename, rows, accepted, rejected, skipped);
+    return item.operation === "update"
+      ? (await tx.member.update({ where: { id: item.targetEntityId!, organizationId: audit.organizationId }, data: item.data })).id
+      : (await tx.member.create({ data: { ...(item.data as Prisma.MemberUncheckedCreateInput), organizationId: audit.organizationId } })).id;
   }
-  try {
-    return await prisma.$transaction(async (tx) => {
-    const batch = await tx.importBatch.create({ data: { organizationId: audit.organizationId, uploadedBy: audit.actorUserId, entityType, originalFilename: filename, status: rejected.length ? "partially_accepted" : "completed", totalRecords: rows.length, acceptedRecords: accepted.length, rejectedRecords: rejected.length, committedRecords: accepted.length, startedAt: new Date(), completedAt: new Date(), metadata: { batch_code: `BATCH-${Date.now()}` } } });
-    const createdIds: string[] = [];
-    for (const item of accepted) {
       let targetEntityId: string;
       if (entityType === "events") {
         const d = item.data;
@@ -234,6 +230,20 @@ export async function commitImport(prisma: AppPrisma, audit: AuditContext, entit
       }
       else if (entityType === "social_work") { const d = item.data; let categoryId: string | null = null; if (d.categoryName) { const category = await tx.socialWorkCategory.findFirst({ where: { organizationId: audit.organizationId, name: { equals: String(d.categoryName), mode: "insensitive" }, isActive: true } }); if (!category) throw new Error(`Social Work Category '${d.categoryName}' does not exist or is inactive`); categoryId = category.id; } targetEntityId = (await tx.socialWorkItem.create({ data: { organizationId: audit.organizationId, title: String(d.title), slug: String(d.slug), summary: d.summary as string | null, description: d.description as string | null, startDate: d.startDate as Date | null, endDate: d.endDate as Date | null, status: String(d.status), displayOrder: Number(d.displayOrder), publishedAt: d.publishedAt as Date | null, categoryId, metadata: asJson(d.metadata), customFields: asJson(d.customFields) } })).id; }
       else { const d = item.data; targetEntityId = (await tx.announcement.create({ data: { organizationId: audit.organizationId, title: String(d.title), slug: String(d.slug), summary: d.summary as string | null, body: String(d.body), status: String(d.status), publishedAt: d.publishedAt as Date | null, expiresAt: d.expiresAt as Date | null, metadata: asJson(d.metadata), customFields: asJson(d.customFields) } })).id; }
+  return targetEntityId;
+}
+
+export async function commitImport(prisma: AppPrisma, audit: AuditContext, entityType: EntityType, filename: string, rows: Row[]) {
+  const { accepted, rejected, skipped } = await validateImportRows(prisma, audit.organizationId, entityType, rows);
+  if (entityType === "members") {
+    return commitMemberImport(prisma, audit, filename, rows, accepted, rejected, skipped);
+  }
+  try {
+    return await prisma.$transaction(async (tx) => {
+    const batch = await tx.importBatch.create({ data: { organizationId: audit.organizationId, uploadedBy: audit.actorUserId, entityType, originalFilename: filename, status: rejected.length ? "partially_accepted" : "completed", totalRecords: rows.length, acceptedRecords: accepted.length, rejectedRecords: rejected.length, committedRecords: accepted.length, startedAt: new Date(), completedAt: new Date(), metadata: { batch_code: `BATCH-${Date.now()}` } } });
+    const createdIds: string[] = [];
+    for (const item of accepted) {
+      const targetEntityId = await persistImportRow(tx, audit, entityType, item);
       createdIds.push(targetEntityId);
       await tx.importRecord.create({ data: { organizationId: audit.organizationId, batchId: batch.id, rowNumber: item.rowNumber, recordKey: item.key, status: "committed", sourceData: asJson(item.source), normalizedData: asJson(item.data), validationErrors: [], targetEntityId, processedAt: new Date() } });
     }
@@ -287,11 +297,8 @@ async function commitMemberImport(prisma: AppPrisma, audit: AuditContext, filena
   const commitItems = async (items: Validated[]): Promise<Array<{ id: string; operation: MemberOperation }>> => prisma.$transaction(async (tx) => {
     const results: Array<{ id: string; operation: MemberOperation }> = [];
     for (const item of items) {
-      const d = item.data;
       const operation = item.operation ?? "create";
-      const targetEntityId = operation === "update"
-        ? (await tx.member.update({ where: { id: item.targetEntityId! }, data: d })).id
-        : (await tx.member.create({ data: { ...(d as Prisma.MemberUncheckedCreateInput), organizationId: audit.organizationId } })).id;
+      const targetEntityId = await persistImportRow(tx, audit, "members", item);
       results.push({ id: targetEntityId, operation });
       await tx.importRecord.create({ data: { organizationId: audit.organizationId, batchId: batch.id, rowNumber: item.rowNumber, recordKey: item.key, status: operation === "create" ? "created" : "updated", sourceData: asJson(item.source), normalizedData: asJson(item.data), validationErrors: [], targetEntityId, processedAt: new Date() } });
     }
