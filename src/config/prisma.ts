@@ -1,7 +1,5 @@
-// backened/src/config/prisma.ts
-
 import "dotenv/config";
-import { PrismaNeon } from "@prisma/adapter-neon";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
 export type AppPrisma = PrismaClient;
@@ -10,7 +8,7 @@ let sharedPrisma: AppPrisma | undefined;
 let sharedConnectionString: string | undefined;
 
 function instantiatePrismaClient(connectionString: string): AppPrisma {
-  const adapter = new PrismaNeon({
+  const adapter = new PrismaPg({
     connectionString,
   });
 
