@@ -26,6 +26,8 @@
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
+    "oci-common": "^2.140.1",
+    "oci-objectstorage": "^2.140.1",
     "pg": "^8.23.0",
     "sharp": "^0.35.3",
     "xlsx": "^0.18.5",

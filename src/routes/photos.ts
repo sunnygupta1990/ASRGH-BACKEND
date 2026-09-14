@@ -20,6 +20,11 @@ import {
   reorderPhotos,
 } from "../services/photo.service";
 import { normalizeParam } from "../utils/routeParams";
+import {
+  deleteOracleObject,
+  deleteOracleObjectByStorageKey,
+  putOracleObject,
+} from "../services/oracleObjectStorage.service";
 
 const router = Router();
 
@@ -55,7 +60,24 @@ function storagePathFromKey(storageKey: string): string | null {
     return path.resolve("storage/thumbnails", path.basename(storageKey));
   }
 
+  if (storageKey.startsWith("/media/profiles/")) {
+    return path.resolve("storage/profiles", path.basename(storageKey));
+  }
+
   return null;
+}
+
+async function deleteStoredMedia(storageKey: string): Promise<void> {
+  await deleteOracleObjectByStorageKey(storageKey);
+
+  const localPath = storagePathFromKey(storageKey);
+  if (localPath) {
+    try {
+      await fs.unlink(localPath);
+    } catch {
+      // Transitional local fallback may already be absent.
+    }
+  }
 }
 
 
@@ -137,26 +159,24 @@ router.post(
 
       const mediaId = crypto.randomUUID();
       const filename = `profile-${mediaId}.webp`;
-      const imageDirectory = path.resolve("storage/images");
-      const imagePath = path.join(imageDirectory, filename);
+      const objectName = `images/${filename}`;
 
-      await fs.mkdir(imageDirectory, { recursive: true });
-      await fs.writeFile(imagePath, file.buffer);
+      await putOracleObject(objectName, file.buffer, "image/webp");
 
       try {
         const mediaAsset = await req.prisma.$transaction(async (tx) => {
           const created = await tx.mediaAsset.create({
             data: {
               organizationId: req.user!.organizationId,
-              storageProvider: "local",
-              storageKey: `/media/images/${filename}`,
+              storageProvider: "oracle-object-storage",
+              storageKey: `/media/${objectName}`,
               originalFilename: file.originalname,
               mimeType: "image/webp",
               fileSizeBytes: BigInt(file.size),
               widthPx: 512,
               heightPx: 512,
               metadata: {
-                thumbnailUrl: `/media/images/${filename}`,
+                thumbnailUrl: `/media/${objectName}`,
                 profilePhoto: true,
               },
             },
@@ -190,14 +210,7 @@ router.post(
         });
 
         if (member.profileMedia) {
-          const oldPath = storagePathFromKey(member.profileMedia.storageKey);
-          if (oldPath) {
-            try {
-              await fs.unlink(oldPath);
-            } catch {
-              // Database state is authoritative when the old file is already absent.
-            }
-          }
+          await deleteStoredMedia(member.profileMedia.storageKey);
 
           await req.prisma.mediaAsset.update({
             where: { id: member.profileMedia.id },
@@ -210,11 +223,7 @@ router.post(
           data: mediaAsset,
         });
       } catch (error) {
-        try {
-          await fs.unlink(imagePath);
-        } catch {
-          // Nothing to clean up when the staged file is already absent.
-        }
+        await deleteOracleObject(objectName);
         throw error;
       }
     } catch (error) {
@@ -252,7 +261,6 @@ router.delete(
       }
 
       const profileMedia = member.profileMedia;
-      const storagePath = storagePathFromKey(profileMedia.storageKey);
 
       await req.prisma.$transaction(async (tx) => {
         await tx.member.update({
@@ -277,13 +285,7 @@ router.delete(
         });
       });
 
-      if (storagePath) {
-        try {
-          await fs.unlink(storagePath);
-        } catch {
-          // Database state remains authoritative.
-        }
-      }
+      await deleteStoredMedia(profileMedia.storageKey);
 
       return res.json({ success: true });
     } catch (error) {
@@ -328,12 +330,6 @@ router.post(
         });
       }
 
-      const imageDirectory = path.resolve("storage/images");
-      const thumbnailDirectory = path.resolve("storage/thumbnails");
-
-      await fs.mkdir(imageDirectory, { recursive: true });
-      await fs.mkdir(thumbnailDirectory, { recursive: true });
-
       const existingCount = await req.prisma.albumPhoto.count({
         where: {
           albumId: album.id,
@@ -347,15 +343,12 @@ router.post(
         const imageFilename = `${id}.webp`;
         const thumbnailFilename = `${id}.webp`;
 
-        const imagePath = path.join(imageDirectory, imageFilename);
-        const thumbnailPath = path.join(
-          thumbnailDirectory,
-          thumbnailFilename,
-        );
+        const imageObjectName = `images/${imageFilename}`;
+        const thumbnailObjectName = `thumbnails/${thumbnailFilename}`;
 
         const metadata = await sharp(file.buffer).metadata();
 
-        await sharp(file.buffer)
+        const imageBuffer = await sharp(file.buffer)
           .rotate()
           .resize({
             width: 1600,
@@ -364,9 +357,9 @@ router.post(
             withoutEnlargement: true,
           })
           .webp({ quality: 82 })
-          .toFile(imagePath);
+          .toBuffer();
 
-        await sharp(file.buffer)
+        const thumbnailBuffer = await sharp(file.buffer)
           .rotate()
           .resize({
             width: 400,
@@ -375,39 +368,60 @@ router.post(
             withoutEnlargement: true,
           })
           .webp({ quality: 78 })
-          .toFile(thumbnailPath);
+          .toBuffer();
 
-        const imageStat = await fs.stat(imagePath);
+        await Promise.all([
+          putOracleObject(imageObjectName, imageBuffer, "image/webp"),
+          putOracleObject(thumbnailObjectName, thumbnailBuffer, "image/webp"),
+        ]);
 
-        const mediaAsset = await req.prisma.mediaAsset.create({
-          data: {
-            organizationId: req.user!.organizationId,
-            storageProvider: "local",
-            storageKey: `/media/images/${imageFilename}`,
-            originalFilename: file.originalname,
-            mimeType: "image/webp",
-            fileSizeBytes: BigInt(imageStat.size),
-            widthPx: metadata.width ?? null,
-            heightPx: metadata.height ?? null,
-            metadata: {
-              thumbnailUrl: `/media/thumbnails/${thumbnailFilename}`,
+        let mediaAsset;
+        try {
+          mediaAsset = await req.prisma.mediaAsset.create({
+            data: {
+              organizationId: req.user!.organizationId,
+              storageProvider: "oracle-object-storage",
+              storageKey: `/media/${imageObjectName}`,
+              originalFilename: file.originalname,
+              mimeType: "image/webp",
+              fileSizeBytes: BigInt(imageBuffer.length),
+              widthPx: metadata.width ?? null,
+              heightPx: metadata.height ?? null,
+              metadata: {
+                thumbnailUrl: `/media/${thumbnailObjectName}`,
+              },
             },
-          },
-        });
+          });
+        } catch (error) {
+          await Promise.all([
+            deleteOracleObject(imageObjectName),
+            deleteOracleObject(thumbnailObjectName),
+          ]);
+          throw error;
+        }
 
-        const albumPhoto = await req.prisma.albumPhoto.create({
-          data: {
-            organizationId: req.user!.organizationId,
-            albumId: album.id,
-            mediaAssetId: mediaAsset.id,
-            displayOrder: existingCount + index,
-          },
-          include: {
-            mediaAsset: true,
-          },
-        });
+        try {
+          const albumPhoto = await req.prisma.albumPhoto.create({
+            data: {
+              organizationId: req.user!.organizationId,
+              albumId: album.id,
+              mediaAssetId: mediaAsset.id,
+              displayOrder: existingCount + index,
+            },
+            include: {
+              mediaAsset: true,
+            },
+          });
 
-        uploadedPhotos.push(albumPhoto);
+          uploadedPhotos.push(albumPhoto);
+        } catch (error) {
+          await req.prisma.mediaAsset.delete({ where: { id: mediaAsset.id } }).catch(() => undefined);
+          await Promise.all([
+            deleteOracleObject(imageObjectName),
+            deleteOracleObject(thumbnailObjectName),
+          ]);
+          throw error;
+        }
       }
 
       await recordAudit(req.prisma, requestAuditContext(req), { action: "PHOTO_UPLOAD", entityType: "event_album", entityId: album.id, metadata: { photoIds: uploadedPhotos.map((photo) => photo.id), count: uploadedPhotos.length } });
@@ -538,22 +552,12 @@ router.delete(
         });
       }
 
-      const filePaths = [
-        storagePathFromKey(storage.storageKey),
-        storage.thumbnailUrl
-          ? storagePathFromKey(storage.thumbnailUrl)
-          : null,
+      const storageKeys = [
+        storage.storageKey,
+        storage.thumbnailUrl,
       ].filter((item): item is string => Boolean(item));
 
-      await Promise.all(
-        filePaths.map(async (filePath) => {
-          try {
-            await fs.unlink(filePath);
-          } catch {
-            // The database state is authoritative if the file is already absent.
-          }
-        }),
-      );
+      await Promise.all(storageKeys.map((storageKey) => deleteStoredMedia(storageKey)));
 
       return res.json({
         success: true,

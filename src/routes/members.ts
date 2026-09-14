@@ -80,7 +80,7 @@ router.get("/", requireAuth, requirePermission(PERMISSIONS.membersRead), async (
           orderBy: { displayOrder: "asc" },
           select: {
             id: true, memberId: true, positionId: true, termId: true, startDate: true, endDate: true,
-            displayOrder: true, notes: true, customFields: true, current: true,
+            displayOrder: true, notes: true, customFields: true,
             position: { select: { id: true, code: true, name: true, displayOrder: true, description: true, isActive: true, customFields: true } },
             term: { select: { id: true, name: true, startDate: true, endDate: true, status: true, notes: true, customFields: true } },
           },
