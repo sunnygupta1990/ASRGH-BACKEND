@@ -34,7 +34,7 @@ app.use("/media", async (req, res, next) => {
       res.setHeader("ETag", object.eTag);
     }
     if (object.lastModified) {
-      res.setHeader("Last-Modified", object.lastModified.toUTCString());
+      res.setHeader("Last-Modified", object.lastModified instanceof Date ? object.lastModified.toUTCString() : String(object.lastModified));
     }
     res.setHeader("Cache-Control", "public, max-age=3600");
 
